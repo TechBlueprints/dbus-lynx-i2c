@@ -292,6 +292,23 @@ def test_no_bus_power(env):
     assert gx_battery_alarms_fuse_blown(env.svc) == 0
 
 
+def test_no_bus_power_never_raises_spurious_fuse_alarms(env):
+    # With the busbar unpowered the fuse bits are garbage; 0xF2 (all fuse
+    # bits + no-supply) must not alarm or show blown fuses.
+    env.adapter.responses[ADDRESSES["A"]] = 0xF2
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "No power on busbar")
+    for i in range(4):
+        assert env.svc.paths["/Distributor/A/Fuse/%d/Status" % i] == 0
+        assert env.svc.paths["/Distributor/A/Fuse/%d/Alarms/Blown" % i] == 0
+    assert gx_battery_alarms_fuse_blown(env.svc) == 0
+    # Power returns with a genuinely blown fuse -> alarm resumes correctly
+    env.adapter.responses[ADDRESSES["A"]] = 0x10
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Fuse blown")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 2
+
+
 def test_comms_lost_after_three_nacks(env):
     env.monitor._poll()
     env.adapter.responses[ADDRESSES["B"]] = I2CNackError(ADDRESSES["B"])

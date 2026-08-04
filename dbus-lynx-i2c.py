@@ -195,11 +195,20 @@ def distributor_status_value(status: FuseStatus) -> int:
 
 
 def fuse_status_values(status: FuseStatus, num_fuses: int) -> list:
-    """Map a successful read to the four /Fuse/n/Status values (0-indexed)."""
+    """Map a successful read to the four /Fuse/n/Status values (0-indexed).
+
+    With the busbar unpowered the fuse bits are meaningless -- detection
+    measures voltage across each fuse -- so populated positions publish
+    Not available instead of trusting the bits (hardware-confirmed by
+    twam/dbus-lynx-distributor and pulquero/dbus-i2c; prevents spurious
+    blown-fuse alarms when the bus is simply switched off).
+    """
     values = []
     for i in range(MAX_FUSES):
         if i >= num_fuses:
             values.append(FUSE_NOT_USED)
+        elif status.no_supply:
+            values.append(FUSE_NOT_AVAILABLE)
         elif status.fuses[i]:
             values.append(FUSE_BLOWN)
         else:

@@ -47,17 +47,40 @@ Requirements/limits:
 
 ### Status byte protocol
 
-Read **one byte** from the distributor's address. Community-documented encoding (verify bit order empirically before trusting — pull a fuse and watch):
+Read **one byte** from the distributor's address. The protocol is
+**read-only**: every read returns the current status byte — no register
+writes, no commands, no initialization. (No official Victron source
+exists — the Lynx Smart BMS firmware is closed — but four independent
+community implementations agree, three of them hardware-validated:
+[twam/dbus-lynx-distributor](https://github.com/twam/dbus-lynx-distributor)
+(FT232H on a Cerbo, the closest prior art to this project),
+[pulquero/dbus-i2c](https://github.com/pulquero/dbus-i2c),
+[Otherbright's Pico W write-up](https://github.com/Otherbright/how-to-read-the-victron-energy-lynx-distributor-device-status),
+and [NightHawk32/Lynx-Distributor-Gateway](https://github.com/NightHawk32/Lynx-Distributor-Gateway).
+The BMS does not appear to send the distributor anything at all — even
+the LEDs are driven autonomously by the distributor from its own state.)
 
-| Bit | Meaning (1 = fault) |
-|---|---|
-| 0x10 | Fuse 1 blown/missing |
-| 0x20 | Fuse 2 blown/missing |
-| 0x40 | Fuse 3 blown/missing |
-| 0x80 | Fuse 4 blown/missing |
-| 0x02 | Busbar has no supply |
+| Bit | Meaning (1 = fault) | Distributor's own LED response |
+|---|---|---|
+| 0x10 | Fuse 1 blown/missing | center red + fuse 1 LED red |
+| 0x20 | Fuse 2 blown/missing | center red + fuse 2 LED red |
+| 0x40 | Fuse 3 blown/missing | center red + fuse 3 LED red |
+| 0x80 | Fuse 4 blown/missing | center red + fuse 4 LED red |
+| 0x02 | Busbar has no supply | center orange |
 
-`0x00` = all four fuses present and intact. Caveat from the Victron manual: with batteries on multiple circuits, a blown battery-side fuse may not read as blown until the battery is under charge/discharge (not enough voltage across the fuse to trigger detection).
+`0x00` = all four fuses present and intact (center LED green).
+
+Two measurement caveats:
+
+- **When the busbar is unpowered (0x02), the fuse bits are meaningless** —
+  detection measures voltage across each fuse. The service publishes
+  fuse status "Not available" in that state rather than trusting the
+  bits (matching twam's and pulquero's behavior), so switching off the
+  bus never raises spurious blown-fuse alarms.
+- From the Victron manual: with batteries on multiple circuits, a blown
+  battery-side fuse may not read as blown until the battery is under
+  charge/discharge (not enough voltage across the fuse to trigger
+  detection).
 
 ### The USB-I2C adapter: Waveshare "USB TO UART/I2C/SPI/JTAG"
 

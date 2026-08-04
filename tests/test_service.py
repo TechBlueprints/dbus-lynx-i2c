@@ -105,6 +105,15 @@ def test_fuse_status_mapping_unpopulated_positions(lynx_service):
     assert values == [3, 2, 1, 1]
 
 
+def test_fuse_status_not_available_without_bus_power(lynx_service):
+    # Unpowered busbar -> fuse bits are garbage; populated positions must
+    # publish Not available (0), never Blown, even with fuse bits set.
+    assert lynx_service.fuse_status_values(decode(0xF2), 4) == [0, 0, 0, 0]
+    assert lynx_service.fuse_status_values(decode(0x02), 4) == [0, 0, 0, 0]
+    values = lynx_service.fuse_status_values(decode(0x32, num_fuses=2), 2)
+    assert values == [0, 0, 1, 1]
+
+
 def test_zero_fuses_all_not_used(lynx_service):
     values = lynx_service.fuse_status_values(decode(0xF0, num_fuses=0), 0)
     assert values == [1, 1, 1, 1]

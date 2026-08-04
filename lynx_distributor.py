@@ -26,9 +26,11 @@ that answers a one-byte read with its fuse status:
     0x40  fuse 3 blown/missing        0x00  all fuses present and intact
     0x80  fuse 4 blown/missing
 
-CAUTION: the bit order comes from community reverse-engineering and the
-sources conflict slightly.  Verify empirically before trusting -- pull
-each fuse in turn and watch the byte:
+The bit order comes from community reverse-engineering; three
+independent hardware-validated implementations agree on this map
+(twam/dbus-lynx-distributor, Otherbright's Pico W write-up,
+NightHawk32/Lynx-Distributor-Gateway).  Still confirm on our own
+hardware -- pull each fuse in turn and watch the byte:
 
     python3 lynx_distributor.py --watch A
 
