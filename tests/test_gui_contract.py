@@ -92,6 +92,7 @@ class FakeAdapter:
     def __init__(self):
         self.responses = {}  # addr -> int | Exception
         self.transport = types.SimpleNamespace(path="/dev/hidraw-fake")
+        self.speed_hz = 20000
         self.closed = False
 
     def i2c_read(self, addr, nbytes):

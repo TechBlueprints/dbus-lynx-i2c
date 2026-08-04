@@ -89,16 +89,25 @@ class ConfigError(Exception):
     pass
 
 
+ADAPTER_TYPES = ("ch347", "kernel-i2c", "mock")
+
+
 class Config:
     def __init__(self, letters, fuse_counts, fuse_names, poll_interval,
-                 i2c_speed_hz, hidraw_device, mock=False):
+                 i2c_speed_hz, hidraw_device, adapter="ch347",
+                 i2c_device=None):
         self.letters = letters
         self.fuse_counts = fuse_counts  # {letter: populated fuse positions}
         self.fuse_names = fuse_names    # {letter: [name, ...] padded to MAX_FUSES}
         self.poll_interval = poll_interval
         self.i2c_speed_hz = i2c_speed_hz
         self.hidraw_device = hidraw_device
-        self.mock = mock
+        self.adapter = adapter          # one of ADAPTER_TYPES
+        self.i2c_device = i2c_device    # kernel-i2c only: /dev/i2c-N
+
+    @property
+    def mock(self):
+        return self.adapter == "mock"
 
 
 def _parse_fuse_names(sec, letters):
@@ -179,14 +188,21 @@ def load_config(base_dir: str) -> Config:
                           % sorted(SPEED_LEVELS))
 
     hidraw_device = sec.get("hidraw_device", "").strip() or None
+    i2c_device = sec.get("i2c_device", "").strip() or None
 
+    adapter = sec.get("adapter", "ch347").strip().lower()
+    if adapter not in ADAPTER_TYPES:
+        raise ConfigError("adapter must be one of %s" % (ADAPTER_TYPES,))
     try:
-        mock = sec.getboolean("mock", False)
+        # Legacy alias for adapter = mock
+        if sec.getboolean("mock", False):
+            adapter = "mock"
     except ValueError:
         raise ConfigError("mock must be a boolean")
 
     return Config(letters, fuse_counts, fuse_names, poll_interval,
-                  i2c_speed_hz, hidraw_device, mock=mock)
+                  i2c_speed_hz, hidraw_device, adapter=adapter,
+                  i2c_device=i2c_device)
 
 
 def distributor_status_value(status: FuseStatus) -> int:
@@ -377,6 +393,9 @@ class FuseMonitor:
         self._healthy = False  # a transfer succeeded on the current adapter
         if config.mock:
             connection = "Mock adapter (no hardware)"
+        elif config.adapter == "kernel-i2c":
+            connection = "Kernel I2C (%s)" % (config.i2c_device
+                                              or "auto CP2112")
         else:
             connection = "CH347 HID-I2C (%s)" % (config.hidraw_device or "auto")
         self.service = LynxBatteryService(bus, config, connection)
@@ -402,9 +421,13 @@ class FuseMonitor:
                 self._mock_logged = True
             return True
         try:
-            self.adapter = CH347I2C.open(
-                path=self.config.hidraw_device,
-                speed_hz=self.config.i2c_speed_hz)
+            if self.config.adapter == "kernel-i2c":
+                from kernel_i2c import KernelI2C
+                self.adapter = KernelI2C.open(path=self.config.i2c_device)
+            else:
+                self.adapter = CH347I2C.open(
+                    path=self.config.hidraw_device,
+                    speed_hz=self.config.i2c_speed_hz)
         except (CH347Error, OSError) as e:
             if not self._outage_logged:
                 log.warning("CH347 adapter unavailable: %s (will keep "
@@ -418,8 +441,10 @@ class FuseMonitor:
         if not self._healthy:
             self._healthy = True
             self._outage_logged = False
-            log.info("CH347 adapter OK on %s (I2C %d Hz)",
-                     self.adapter.transport.path, self.config.i2c_speed_hz)
+            speed = ("%d Hz" % self.adapter.speed_hz
+                     if self.adapter.speed_hz else "bus-defined rate")
+            log.info("I2C adapter OK on %s (%s)",
+                     self.adapter.transport.path, speed)
             self.service.adapter_found()
 
     def _drop_adapter(self, log_it: bool = True) -> None:

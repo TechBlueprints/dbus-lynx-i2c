@@ -94,7 +94,7 @@ Rejected alternatives, for the record:
 
 | Adapter | Verdict on Cerbo |
 |---|---|
-| CP2112 boards (CJMCU clone) | ✅ works via in-kernel `hid-cp2112` → native `/dev/i2c-N`, but every Amazon board ships with unsoldered headers; the no-solder option is the Silabs **CP2112EK** eval kit (Digi-Key 336-2010-ND, ~$42). This is the fallback if M2/HID disappoints. |
+| CP2112 boards (CJMCU clone) | ✅ works via in-kernel `hid-cp2112` → native `/dev/i2c-N`, but every Amazon board ships with unsoldered headers; the no-solder option is the Silabs **CP2112EK** eval kit (Digi-Key 336-2010-ND, ~$42). This is the fallback if M2/HID disappoints — **already supported**: set `adapter = kernel-i2c` (see [kernel_i2c.py](kernel_i2c.py)). |
 | CH341A/CH341T sticks | ❌ I2C mode needs the out-of-tree `i2c-ch341-usb` module; Venus only ships the CH341 *serial* driver |
 | CP2102 "USB to TTL" cables | ❌ UART only — no I2C hardware at all, despite the similar name |
 | Victron VE.Direct(-USB) cables | ❌ UART, not I2C |
@@ -135,8 +135,10 @@ The service is three pure-Python-stdlib modules (no pip on Venus OS):
 | Module | Role |
 |--------|------|
 | [ch347.py](ch347.py) | CH347 HID-I2C driver: sysfs auto-detect (VID:PID `1a86:55dc`, HID interface 1), HID report framing, CH341-compatible I2C command stream, plus a bring-up CLI (`--list/--scan/--read/--watch`) |
+| [kernel_i2c.py](kernel_i2c.py) | Kernel `/dev/i2c-N` backend (`adapter = kernel-i2c`) — the CP2112 fallback path, pure-stdlib `fcntl.ioctl` (no smbus2), CP2112 auto-detect by sysfs adapter name, same bring-up CLI |
 | [lynx_distributor.py](lynx_distributor.py) | Status-byte decode (fuse bits, no-supply bit, unpopulated-position masking) plus the fuse-pull verification CLI (`--decode/--watch`) |
-| [dbus-lynx-i2c.py](dbus-lynx-i2c.py) | Poller + D-Bus services via `velib_python`; adapter hot-plug recovery and per-distributor disconnect handling |
+| [dbus-lynx-i2c.py](dbus-lynx-i2c.py) | Poller + D-Bus services via `velib_python`; selectable adapter backend, hot-plug recovery and per-distributor disconnect handling |
+| [mock_adapter.py](mock_adapter.py) | `adapter = mock`: simulate the distributor chain from a JSON state file (development) |
 
 Protocol sources: WCH's *CH347 Application Development Manual* (in the [Waveshare demo package](https://files.waveshare.com/wiki/USB-TO-UART-I2C-SPI-JTAG/USB-TO-UART-I2C-SPI-JTAG-Demo.zip)) cross-checked against two open-source implementations: [i2cy/CH347-HIDAPI](https://github.com/i2cy/CH347-HIDAPI) (Python) and [serfreeman1337/go-ch347](https://github.com/serfreeman1337/go-ch347) (Go, built from USB captures).
 
@@ -313,7 +315,9 @@ tail -f /var/log/dbus-lynx-i2c/current | tai64nlocal  # Logs
 |------|---------|
 | `dbus-lynx-i2c.py` | Main service: config, poller, D-Bus registration |
 | `ch347.py` | CH347 USB-HID I2C driver + bring-up CLI |
+| `kernel_i2c.py` | Kernel `/dev/i2c-N` backend (CP2112 fallback) + bring-up CLI |
 | `lynx_distributor.py` | Status-byte decoder + fuse-pull verification CLI |
+| `mock_adapter.py` | Development backend simulating the distributor chain |
 | `service/run`, `service/log/run` | daemontools service + multilog logging |
 | `install.sh` | Remote installer (clone/update, submodules, enable, start) |
 | `enable.sh` / `disable.sh` | Hook/unhook the service and `/data/rc.local` entry |
