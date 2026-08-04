@@ -2,7 +2,7 @@
 
 Venus OS D-Bus service for **Victron Lynx Distributor fuse monitoring** on a Cerbo GX — without a Lynx Smart BMS. A USB-I2C adapter (Waveshare CH347) plugged into the Cerbo reads each distributor's fuse-status byte over the RJ10 I2C bus and publishes it to D-Bus so blown fuses surface on the GX display and VRM.
 
-> **Status:** hardware validated on paper, adapter ordered; driver not yet written. This README documents the complete hardware design; repo scaffolding (license, service files, install/enable/disable scripts, `velib_python` submodule) is in place. Software (CH347-HID I2C driver, poller, D-Bus service) lands next.
+> **Status:** hardware validated on paper, adapter ordered; software written but **not yet validated on hardware**. The CH347 HID-I2C driver, status-byte decoder, poller and D-Bus service are implemented with unit tests; the fuse-bit encoding and the CH347 framing still need empirical verification the day the adapter and distributors are in hand (see [Bring-up](#bring-up-first-day-with-hardware)).
 
 ## Why
 
@@ -17,7 +17,7 @@ Cerbo GX (Venus OS)                      Lynx Distributor "A"        Lynx Distri
 │  └ /dev/hidraw*  ───┼──────► Waveshare │ RJ10 ◄───────────┼────────┼─► RJ10           │
 │                     │        CH347     │  (jack L)  (jack R)       │                  │
 └─────────────────────┘        (M2, 5V)  └──────────────────┘        └──────────────────┘
-                                   └── I2C @ 5V, ~50 kHz, one bus for up to 4 distributors
+                                   └── I2C @ 5V, 20 kHz (see Software), one bus for up to 4 distributors
 ```
 
 One adapter serves all distributors: each Lynx Distributor has **two RJ10 jacks** (left and right) and daisy-chains (Lynx Distributor manual §6.2.1).
@@ -105,18 +105,85 @@ Pre-flight: with the adapter on USB and nothing else connected, verify ~5V acros
 - `cdc-acm.ko` and `ch341.ko` (serial-only) present.
 - Persistence pattern (like sibling projects [dbus-power-watchdog](https://github.com/TechBlueprints/dbus-power-watchdog), [dbus-aggregate-smartshunts](https://github.com/TechBlueprints/dbus-aggregate-smartshunts)): install under `/data` (survives firmware updates), autostart via `/data/rc.local`, D-Bus via the `velib_python` bundled in Venus.
 
-## Software plan
+## Software
 
-1. **CH347 HID-I2C driver** (pure Python, stdlib only — no pip on Venus): open `/dev/hidraw*`, speak the CH347 I2C command protocol (public: WCH's *CH347 Application Development Manual* in the [Waveshare demo package](https://files.waveshare.com/wiki/USB-TO-UART-I2C-SPI-JTAG/USB-TO-UART-I2C-SPI-JTAG-Demo.zip); open-source reference: [ch347-hidapi](https://github.com/MeimeiZ/ch347-hidapi)). Configure 50 kHz (falls in CH347 standard-mode class), read 1 byte from 0x08/0x09.
-2. **Empirical verification**: pull each fuse in turn, record the byte, pin down the bit order (community sources conflict slightly).
-3. **Poller + D-Bus service** via `velib_python`: one service per distributor, fuse states + alarm paths so VRM raises notifications. Exact D-Bus service class (digital-input-style vs. generic) to be settled against what systemcalc/VRM will display.
-4. ~~**Packaging**: `/data/apps/dbus-lynx-i2c/`, `rc.local` hook, install script.~~ Done — see below.
+The service is three pure-Python-stdlib modules (no pip on Venus OS):
+
+| Module | Role |
+|--------|------|
+| [ch347.py](ch347.py) | CH347 HID-I2C driver: sysfs auto-detect (VID:PID `1a86:55dc`, HID interface 1), HID report framing, CH341-compatible I2C command stream, plus a bring-up CLI (`--list/--scan/--read/--watch`) |
+| [lynx_distributor.py](lynx_distributor.py) | Status-byte decode (fuse bits, no-supply bit, unpopulated-position masking) plus the fuse-pull verification CLI (`--decode/--watch`) |
+| [dbus-lynx-i2c.py](dbus-lynx-i2c.py) | Poller + D-Bus services via `velib_python`; adapter hot-plug recovery and per-distributor disconnect handling |
+
+Protocol sources: WCH's *CH347 Application Development Manual* (in the [Waveshare demo package](https://files.waveshare.com/wiki/USB-TO-UART-I2C-SPI-JTAG/USB-TO-UART-I2C-SPI-JTAG-Demo.zip)) cross-checked against two open-source implementations: [i2cy/CH347-HIDAPI](https://github.com/i2cy/CH347-HIDAPI) (Python) and [serfreeman1337/go-ch347](https://github.com/serfreeman1337/go-ch347) (Go, built from USB captures).
+
+One deviation from the original plan: the CH347's I2C clock is limited to exactly 20/100/400/750 kHz, so the community-proven ~50 kHz is not available. The default is **20 kHz** (closest rate at or below); `i2c_speed_hz = 100000` is a config option once the bus is proven.
+
+### D-Bus services
+
+One service per distributor, digital-input style (following the
+`dbus-digitalinputs` conventions — ProductId `0xA166`, `/State` 8=OK/9=Alarm,
+`/Alarm` 0/2 — so the GX device list and notifications render it natively):
+
+```
+com.victronenergy.digitalinput.lynx_distributor_a   (DeviceInstance 100 + index)
+```
+
+| Path | Meaning |
+|------|---------|
+| `/State` | 8 = OK, 9 = Alarm (any monitored fuse blown, or busbar unpowered) |
+| `/Alarm` | 0 = ok, 2 = alarm — drives GX/VRM notifications; gated by `/Settings/AlarmSetting` |
+| `/InputState` | 0/1 mirror of the alarm condition |
+| `/Connected` | 0 when the distributor stops ACKing (3 consecutive polls) or the adapter is unplugged |
+| `/Distributor/StatusByte` | Raw status byte (for the empirical phase and debugging) |
+| `/Distributor/NoBusSupply` | 0/1 — the 0x02 bit |
+| `/Fuses/1..4/Blown` | 0/1 per populated position, invalid for unpopulated ones |
+| `/Count` | OK→Alarm transitions since service start |
+| `/CustomName`, `/Settings/AlarmSetting` | Writable, persisted via `com.victronenergy.settings` |
+
+A dead bus deliberately does **not** clear an active alarm — `/Connected`
+drops but `/State`/`/Alarm` hold their last value.
+
+> The digitalinput service class is provisional (the "digital-input-style
+> vs. generic" question): it is the one class where a custom ok/alarm
+> device renders natively in the GX UI, but what VRM makes of it still
+> needs to be seen on real hardware.
+
+### Bring-up (first day with hardware)
+
+After the [pre-flight wiring checks](#adapter-configuration-and-wiring), from the repo directory on the Cerbo:
+
+```bash
+# 1. Adapter enumerates? (M2 mode → two hidraw nodes, we want interface 1)
+python3 ch347.py --list
+
+# 2. Distributors answer? (expect 0x08, plus 0x09... if chained)
+python3 ch347.py --scan
+
+# 3. Raw read
+python3 ch347.py --read 0x08
+
+# 4. THE empirical step: pull each fuse in turn, watch the bits.
+#    Community sources conflict slightly on bit order — verify before trusting.
+python3 lynx_distributor.py --watch A
+```
+
+If the bit order differs from the documented encoding (`0x10/0x20/0x40/0x80` = fuse 1-4, `0x02` = no supply), fix `FUSE_BITS`/`BIT_NO_SUPPLY` in [lynx_distributor.py](lynx_distributor.py) and the unit tests, and note the finding here.
+
+### Tests
+
+```bash
+python3 -m pytest
+```
+
+Runs on any dev machine — Venus-only libraries (`dbus`, `gi`, `velib_python`) are stubbed, the CH347 driver is tested against a fake HID transport with wire-format assertions, and the decoder/config parsing are covered directly.
 
 ## Installation
 
-> ⚠️ The driver is not yet implemented — installing today registers a service
-> that idles with a "not yet implemented" log line. The plumbing below is in
-> place so the software drops straight in once the hardware arrives.
+> ⚠️ The software has not been validated on hardware yet — until the
+> [bring-up steps](#bring-up-first-day-with-hardware) confirm the CH347
+> framing and the fuse-bit order, treat what this service publishes as
+> unverified.
 
 ### One-Line Remote Install
 
@@ -173,13 +240,15 @@ tail -f /var/log/dbus-lynx-i2c/current | tai64nlocal  # Logs
 
 | Path | Purpose |
 |------|---------|
-| `dbus-lynx-i2c.py` | Main service (placeholder until the driver lands) |
+| `dbus-lynx-i2c.py` | Main service: config, poller, D-Bus registration |
+| `ch347.py` | CH347 USB-HID I2C driver + bring-up CLI |
+| `lynx_distributor.py` | Status-byte decoder + fuse-pull verification CLI |
 | `service/run`, `service/log/run` | daemontools service + multilog logging |
 | `install.sh` | Remote installer (clone/update, submodules, enable, start) |
 | `enable.sh` / `disable.sh` | Hook/unhook the service and `/data/rc.local` entry |
 | `config.default.ini` | Configuration template (copy to `config.ini`) |
 | `ext/velib_python/` | Victron D-Bus helper library (git submodule) |
-| `tests/` | pytest suite (protocol decode tests land with the driver) |
+| `tests/` | pytest suite: driver wire format, decoder, config parsing |
 
 ## Third-Party Software
 
