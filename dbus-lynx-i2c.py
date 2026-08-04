@@ -214,10 +214,12 @@ class LynxBatteryService:
         self._settings = SettingsDevice(
             bus,
             {
-                # High default instance: lose battery auto-select ties to
-                # any real battery monitor.
+                # systemcalc's battery auto-select breaks ties (services
+                # without /Info/MaxChargeVoltage, e.g. us vs. a SmartShunt)
+                # by LOWEST device instance, and real monitors sit at
+                # ~245-512.  Default far above so we always lose the tie.
                 "instance": ["%s/ClassAndVrmInstance" % settings_base,
-                             "battery:200", 0, 0],
+                             "battery:990", 0, 0],
                 "customname": ["%s/CustomName" % settings_base, "", 0, 0],
             },
             eventCallback=self._setting_changed,

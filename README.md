@@ -129,7 +129,7 @@ names and blown states — with no custom GUI work:
 
 ```
 com.victronenergy.battery.lynx_i2c          (one service for the whole chain,
-                                             DeviceInstance 200)
+                                             DeviceInstance 990)
 ```
 
 | Path | Meaning |
@@ -149,13 +149,31 @@ active `/Alarms/Blown` and `/Alarms/FuseBlown` are deliberately **held** —
 a dead bus must not silently clear a fuse alarm.
 
 **Why a battery service?** The fuse UI in gui-v2 only exists on battery
-pages — `/NrOfDistributors > 0` on a battery service is what makes the
-"Fuses" menu appear. The service publishes no `/Dc/*`, `/Soc` or `/Info/*`
-paths, so systemcalc's battery auto-selection prefers any real
-BMS/shunt (those carry `/Info/MaxChargeVoltage` and lower device
-instances; ours defaults to 200). If your system has no other battery
-service at all, pin the right monitor in **Settings → System setup →
-Battery monitor**.
+pages — `/NrOfDistributors` is read in exactly one place in the whole GX
+UI (`PageBattery.qml`), and PageBattery is only reachable for services of
+type `battery`. No other service class can get the native Fuses pages.
+
+**System side effects, validated against dbus-systemcalc-py source**
+(and locked in by `tests/test_systemcalc_contract.py`):
+
+- **Battery auto-selection**: never prefers us over a real monitor. A
+  managed battery (BMS) wins on its `/Info/MaxChargeVoltage`; a plain
+  BMV/SmartShunt wins the tie because auto-select picks the *lowest*
+  device instance and ours defaults to 990, above the real-world range
+  (~245–512). Only if this is the **only** battery service in the system
+  does auto-select pick it (dashboard battery tile then shows no data) —
+  pin **Settings → System setup → Battery monitor** to "No battery
+  monitor" in that case.
+- **Battery measurements / VRM battery widgets / marine MFD app**
+  (`/Batteries`, `/AvailableBatteries`): we are **excluded** — systemcalc
+  only lists batteries with a valid `/Dc/0/Voltage`, which we never
+  publish.
+- **DVCC**: never treats us as a BMS (requires `/Info/MaxChargeVoltage`).
+- **Battery monitor dropdown** (`/AvailableBatteryServices`): the one
+  place we *do* appear, as "Lynx Distributor Monitor on CH347 HID-I2C" —
+  systemcalc lists every connected battery service and hiding would
+  require breaking `/Connected`/`/ProductName`. Harmless unless manually
+  selected.
 
 ### Bring-up (first day with hardware)
 
