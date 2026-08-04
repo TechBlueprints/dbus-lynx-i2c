@@ -19,20 +19,26 @@ from __future__ import annotations
 Venus OS D-Bus service for Victron Lynx Distributor fuse monitoring.
 
 Polls each configured distributor's one-byte fuse status over I2C (via a
-CH347 USB-HID adapter on /dev/hidraw*) and publishes one digital-input
-style D-Bus service per distributor:
+CH347 USB-HID adapter on /dev/hidraw*) and publishes a single battery
+service mirroring the Lynx Smart BMS distributor schema (Venus wiki
+dbus.md, "Lynx Smart BMS" section), so the native GX "Fuses" pages and
+alarms render it exactly like the real BMS:
 
-    com.victronenergy.digitalinput.lynx_distributor_a
-        /State        8 = OK, 9 = Alarm            (GX device list)
-        /Alarm        0 = ok, 2 = alarm            (GX/VRM notifications)
-        /InputState   0/1 mirror of the alarm condition
-        /Distributor/StatusByte, /Distributor/NoBusSupply
-        /Fuses/<n>/Blown  per populated fuse position
+    com.victronenergy.battery.lynx_i2c
+        /NrOfDistributors
+        /Distributor/<A-D>/Status                0=N/A, 1=Connected,
+                                                 2=No bus power, 3=Comms lost
+        /Distributor/<A-D>/Alarms/ConnectionLost 0=Ok, 2=Alarm
+        /Distributor/<A-D>/Fuse/<0-3>/Name       user-set, 16 bytes max
+        /Distributor/<A-D>/Fuse/<0-3>/Status     0=N/A, 1=Not used,
+                                                 2=Ok, 3=Blown
+        /Distributor/<A-D>/Fuse/<0-3>/Alarms/Blown  0=Ok, 2=Alarm
+        /Alarms/FuseBlown                        0=Ok, 2=Alarm (any fuse)
 
-The digitalinput service class is provisional (README "Software plan"
-step 3): it renders in the GX device list with an ok/alarm state and its
-/Alarm path follows the dbus-digitalinputs convention (0/2), pending
-verification of what systemcalc/VRM actually display.
+The service publishes no /Dc/0/* or /Soc paths, so systemcalc's battery
+auto-selection prefers any real BMS/shunt (they carry /Info/* paths and
+lower instances); if auto-select still picks this service, pin the real
+monitor in Settings -> System setup -> Battery monitor.
 """
 
 import configparser
@@ -51,22 +57,30 @@ from vedbus import VeDbusService  # noqa: E402
 from settingsdevice import SettingsDevice  # noqa: E402
 
 from ch347 import CH347I2C, CH347Error, I2CNackError, SPEED_LEVELS  # noqa: E402
-from lynx_distributor import ADDRESSES, MAX_FUSES, decode, describe  # noqa: E402
+from lynx_distributor import (  # noqa: E402
+    ADDRESSES, MAX_FUSES, FuseStatus, decode, describe)
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
-# dbus-digitalinputs conventions (see victronenergy/dbus-digitalinputs):
-PRODUCT_ID = 0xA166           # digital input
-TYPE_GENERIC_IO = 10          # /Type "Generic I/O"
-STATE_OK = 8                  # /State, "ok/alarm" translation pair
-STATE_ALARM = 9
-ALARM_OK = 0                  # /Alarm
+# Lynx Smart BMS distributor conventions (Venus wiki dbus.md + gui-v2
+# PageLynxDistributorList.qml / FuseInfo.qml):
+DIST_NOT_AVAILABLE = 0
+DIST_CONNECTED = 1
+DIST_NO_BUS_POWER = 2
+DIST_COMMS_LOST = 3
+
+FUSE_NOT_AVAILABLE = 0
+FUSE_NOT_USED = 1
+FUSE_OK = 2
+FUSE_BLOWN = 3
+
+ALARM_OK = 0
 ALARM_ALARM = 2
 
-# Consecutive failed polls before a distributor is marked disconnected.
+FUSE_NAME_MAX_BYTES = 16  # firmware limit on the real BMS; we match it
+
+# Consecutive failed polls before a distributor is marked comms-lost.
 FAILS_BEFORE_DISCONNECT = 3
-# Seconds between attempts to (re)open the CH347 adapter.
-ADAPTER_RETRY_SECONDS = 10
 
 log = logging.getLogger("dbus-lynx-i2c")
 
@@ -76,13 +90,36 @@ class ConfigError(Exception):
 
 
 class Config:
-    def __init__(self, letters, fuse_counts, poll_interval,
+    def __init__(self, letters, fuse_counts, fuse_names, poll_interval,
                  i2c_speed_hz, hidraw_device):
         self.letters = letters
         self.fuse_counts = fuse_counts  # {letter: populated fuse positions}
+        self.fuse_names = fuse_names    # {letter: [name, ...] padded to MAX_FUSES}
         self.poll_interval = poll_interval
         self.i2c_speed_hz = i2c_speed_hz
         self.hidraw_device = hidraw_device
+
+
+def _parse_fuse_names(sec, letters):
+    """Optional per-distributor fuse names: ``fuse_names_a = Inverter, ...``"""
+    names = {}
+    for letter in letters:
+        raw = sec.get("fuse_names_%s" % letter.lower(), "").strip()
+        parts = [p.strip() for p in raw.split(",")] if raw else []
+        if len(parts) > MAX_FUSES:
+            raise ConfigError(
+                "fuse_names_%s has %d entries; max %d"
+                % (letter.lower(), len(parts), MAX_FUSES))
+        padded = []
+        for i in range(MAX_FUSES):
+            name = parts[i] if i < len(parts) else ""
+            if len(name.encode("utf-8")) > FUSE_NAME_MAX_BYTES:
+                raise ConfigError(
+                    "fuse name %r exceeds %d bytes (the GUI matches the "
+                    "BMS firmware limit)" % (name, FUSE_NAME_MAX_BYTES))
+            padded.append(name)
+        names[letter] = padded
+    return names
 
 
 def load_config(base_dir: str) -> Config:
@@ -123,6 +160,8 @@ def load_config(base_dir: str) -> Config:
     else:
         fuse_counts = {letter: MAX_FUSES for letter in letters}
 
+    fuse_names = _parse_fuse_names(sec, letters)
+
     try:
         poll_interval = sec.getfloat("poll_interval", 5.0)
     except ValueError:
@@ -140,77 +179,95 @@ def load_config(base_dir: str) -> Config:
 
     hidraw_device = sec.get("hidraw_device", "").strip() or None
 
-    return Config(letters, fuse_counts, poll_interval,
+    return Config(letters, fuse_counts, fuse_names, poll_interval,
                   i2c_speed_hz, hidraw_device)
 
 
-class DistributorService:
-    """One com.victronenergy.digitalinput.* service per Lynx Distributor."""
+def distributor_status_value(status: FuseStatus) -> int:
+    """Map a successful read to /Distributor/X/Status."""
+    return DIST_NO_BUS_POWER if status.no_supply else DIST_CONNECTED
 
-    def __init__(self, bus, letter: str, num_fuses: int, connection: str):
-        self.letter = letter
-        self.address = ADDRESSES[letter]
-        self.num_fuses = num_fuses
-        self.fail_count = 0
-        self._alarm_condition = False
-        self._last_raw = None
 
-        key = "lynx_distributor_%s" % letter.lower()
-        default_name = "Lynx Distributor %s" % letter
-        settings_base = "/Settings/Devices/%s" % key
-        default_instance = 100 + ord(letter) - ord("A")
+def fuse_status_values(status: FuseStatus, num_fuses: int) -> list:
+    """Map a successful read to the four /Fuse/n/Status values (0-indexed)."""
+    values = []
+    for i in range(MAX_FUSES):
+        if i >= num_fuses:
+            values.append(FUSE_NOT_USED)
+        elif status.fuses[i]:
+            values.append(FUSE_BLOWN)
+        else:
+            values.append(FUSE_OK)
+    return values
 
+
+class LynxBatteryService:
+    """Single battery service mirroring the Lynx Smart BMS fuse schema."""
+
+    def __init__(self, bus, config: Config, connection: str):
+        self.config = config
+        self.fail_counts = {letter: 0 for letter in config.letters}
+        self._last_raw = {letter: None for letter in config.letters}
+
+        default_name = "Lynx Distributor Monitor"
+        settings_base = "/Settings/Devices/lynx_i2c"
         self._settings = SettingsDevice(
             bus,
             {
+                # High default instance: lose battery auto-select ties to
+                # any real battery monitor.
                 "instance": ["%s/ClassAndVrmInstance" % settings_base,
-                             "digitalinput:%d" % default_instance, 0, 0],
+                             "battery:200", 0, 0],
                 "customname": ["%s/CustomName" % settings_base, "", 0, 0],
-                "alarmsetting": ["%s/AlarmSetting" % settings_base, 1, 0, 1],
             },
             eventCallback=self._setting_changed,
             timeout=120,
         )
         instance = int(self._settings["instance"].split(":")[1])
 
-        svc = VeDbusService(
-            "com.victronenergy.digitalinput.%s" % key, bus, register=False)
+        svc = VeDbusService("com.victronenergy.battery.lynx_i2c", bus,
+                            register=False)
         svc.add_path("/Mgmt/ProcessName", __file__)
         svc.add_path("/Mgmt/ProcessVersion", VERSION)
         svc.add_path("/Mgmt/Connection", connection)
         svc.add_path("/DeviceInstance", instance)
-        svc.add_path("/ProductId", PRODUCT_ID)
+        svc.add_path("/ProductId", 0xFFFF)
         svc.add_path("/ProductName",
                      self._settings["customname"] or default_name)
         svc.add_path("/CustomName", self._settings["customname"],
                      writeable=True, onchangecallback=self._customname_written)
-        svc.add_path("/FirmwareVersion", None)
+        svc.add_path("/FirmwareVersion", VERSION)
         svc.add_path("/HardwareVersion", None)
-        svc.add_path("/Connected", 0)
+        svc.add_path("/Connected", 1)
 
-        svc.add_path("/Type", TYPE_GENERIC_IO)
-        svc.add_path("/State", STATE_OK,
-                     gettextcallback=lambda p, v:
-                         "alarm" if v == STATE_ALARM else "ok")
-        svc.add_path("/InputState", 0)
-        svc.add_path("/Alarm", ALARM_OK)
-        svc.add_path("/Count", 0)
-        svc.add_path("/Settings/AlarmSetting", self._settings["alarmsetting"],
-                     writeable=True, onchangecallback=self._alarmsetting_written)
-
-        svc.add_path("/Distributor/Letter", letter)
-        svc.add_path("/Distributor/Address", self.address)
-        svc.add_path("/Distributor/NumberOfFuses", num_fuses)
-        svc.add_path("/Distributor/StatusByte", None)
-        svc.add_path("/Distributor/NoBusSupply", None)
-        for i in range(1, MAX_FUSES + 1):
-            svc.add_path("/Fuses/%d/Blown" % i, None)
+        svc.add_path("/NrOfDistributors", len(config.letters))
+        svc.add_path("/Alarms/FuseBlown", ALARM_OK)
+        for letter in config.letters:
+            base = "/Distributor/%s" % letter
+            svc.add_path("%s/Status" % base, DIST_NOT_AVAILABLE,
+                         gettextcallback=self._status_text)
+            svc.add_path("%s/Alarms/ConnectionLost" % base, ALARM_OK)
+            for i in range(MAX_FUSES):
+                svc.add_path("%s/Fuse/%d/Name" % (base, i),
+                             config.fuse_names[letter][i],
+                             writeable=True,
+                             onchangecallback=self._fuse_name_written)
+                svc.add_path("%s/Fuse/%d/Status" % (base, i),
+                             FUSE_NOT_AVAILABLE)
+                svc.add_path("%s/Fuse/%d/Alarms/Blown" % (base, i), ALARM_OK)
         svc.register()
         self._service = svc
         self._default_name = default_name
-        log.info("registered com.victronenergy.digitalinput.%s "
-                 "(instance %d, addr 0x%02X, %d fuses)",
-                 key, instance, self.address, num_fuses)
+        log.info("registered com.victronenergy.battery.lynx_i2c "
+                 "(instance %d, distributors %s)",
+                 instance, ", ".join(config.letters))
+
+    @staticmethod
+    def _status_text(path, value):
+        return {DIST_NOT_AVAILABLE: "Not available",
+                DIST_CONNECTED: "Connected",
+                DIST_NO_BUS_POWER: "No bus power",
+                DIST_COMMS_LOST: "Communications lost"}.get(value, str(value))
 
     # ── settings plumbing ───────────────────────────────────────────────
 
@@ -219,86 +276,87 @@ class DistributorService:
         self._service["/ProductName"] = value or self._default_name
         return True
 
-    def _alarmsetting_written(self, path, value):
-        if value not in (0, 1):
-            return False
-        self._settings["alarmsetting"] = value
-        self._publish_alarm()
-        return True
-
     def _setting_changed(self, setting, oldvalue, newvalue):
-        # A setting changed behind our back (e.g. via com.victronenergy.settings)
         if setting == "customname":
             self._service["/CustomName"] = newvalue
             self._service["/ProductName"] = newvalue or self._default_name
-        elif setting == "alarmsetting":
-            self._service["/Settings/AlarmSetting"] = newvalue
-            self._publish_alarm()
 
-    def _publish_alarm(self):
-        active = self._alarm_condition and bool(self._settings["alarmsetting"])
-        self._service["/Alarm"] = ALARM_ALARM if active else ALARM_OK
+    def _fuse_name_written(self, path, value):
+        # GUI-side renames are accepted but only live until restart; use
+        # config.ini fuse_names_<letter> for persistent names.
+        if len(str(value).encode("utf-8")) > FUSE_NAME_MAX_BYTES:
+            return False
+        return True
 
     # ── poll results ────────────────────────────────────────────────────
 
-    def update(self, raw: int) -> None:
-        """Publish a successfully-read status byte."""
-        self.fail_count = 0
-        status = decode(raw, self.num_fuses)
-        if raw != self._last_raw:
-            log.info("distributor %s: %s", self.letter, describe(status))
-            self._last_raw = raw
-        was_active = self._alarm_condition
-        self._alarm_condition = status.alarm_active
+    def update(self, letter: str, raw: int) -> None:
+        """Publish a successfully-read status byte for one distributor."""
+        self.fail_counts[letter] = 0
+        num_fuses = self.config.fuse_counts[letter]
+        status = decode(raw, num_fuses)
+        if raw != self._last_raw[letter]:
+            log.info("distributor %s: %s", letter, describe(status))
+            self._last_raw[letter] = raw
+        base = "/Distributor/%s" % letter
         with self._service as s:
-            s["/Connected"] = 1
-            s["/Distributor/StatusByte"] = raw
-            s["/Distributor/NoBusSupply"] = int(status.no_supply)
-            for i in range(1, MAX_FUSES + 1):
-                s["/Fuses/%d/Blown" % i] = (
-                    int(status.fuses[i - 1]) if i <= self.num_fuses else None)
-            s["/InputState"] = int(status.alarm_active)
-            s["/State"] = STATE_ALARM if status.alarm_active else STATE_OK
-            if status.alarm_active and not was_active:
-                s["/Count"] = self._service["/Count"] + 1
-            s["/Alarm"] = (ALARM_ALARM
-                           if status.alarm_active
-                           and bool(self._settings["alarmsetting"])
-                           else ALARM_OK)
+            s["%s/Status" % base] = distributor_status_value(status)
+            s["%s/Alarms/ConnectionLost" % base] = ALARM_OK
+            for i, value in enumerate(fuse_status_values(status, num_fuses)):
+                s["%s/Fuse/%d/Status" % (base, i)] = value
+                s["%s/Fuse/%d/Alarms/Blown" % (base, i)] = (
+                    ALARM_ALARM if value == FUSE_BLOWN else ALARM_OK)
+            self._publish_fuse_blown(s)
 
-    def comm_failure(self) -> None:
-        """One failed poll; mark disconnected after a few in a row."""
-        self.fail_count += 1
-        if self.fail_count == FAILS_BEFORE_DISCONNECT:
+    def comm_failure(self, letter: str) -> None:
+        """One failed poll; mark comms-lost after a few in a row."""
+        self.fail_counts[letter] += 1
+        if self.fail_counts[letter] == FAILS_BEFORE_DISCONNECT:
             log.warning("distributor %s: no response after %d polls, "
-                        "marking disconnected", self.letter, self.fail_count)
-            self.mark_disconnected()
+                        "marking communications lost",
+                        letter, self.fail_counts[letter])
+            self._mark_comms_lost(letter)
 
-    def mark_disconnected(self) -> None:
-        self._last_raw = None
+    def adapter_lost(self) -> None:
         with self._service as s:
             s["/Connected"] = 0
-            s["/Distributor/StatusByte"] = None
-            s["/Distributor/NoBusSupply"] = None
-            for i in range(1, MAX_FUSES + 1):
-                s["/Fuses/%d/Blown" % i] = None
-        # /State, /Alarm and the alarm condition are left as-is: a dead bus
-        # must not silently clear an active fuse alarm.
+        for letter in self.config.letters:
+            self._mark_comms_lost(letter)
+
+    def adapter_found(self) -> None:
+        self._service["/Connected"] = 1
+
+    def _mark_comms_lost(self, letter: str) -> None:
+        self._last_raw[letter] = None
+        base = "/Distributor/%s" % letter
+        with self._service as s:
+            s["%s/Status" % base] = DIST_COMMS_LOST
+            s["%s/Alarms/ConnectionLost" % base] = ALARM_ALARM
+            for i in range(MAX_FUSES):
+                s["%s/Fuse/%d/Status" % (base, i)] = FUSE_NOT_AVAILABLE
+            # Fuse /Alarms/Blown values are deliberately held: a dead bus
+            # must not silently clear an active fuse alarm.
+
+    def _publish_fuse_blown(self, s) -> None:
+        blown = any(
+            s["/Distributor/%s/Fuse/%d/Alarms/Blown" % (letter, i)]
+            == ALARM_ALARM
+            for letter in self.config.letters
+            for i in range(MAX_FUSES))
+        s["/Alarms/FuseBlown"] = ALARM_ALARM if blown else ALARM_OK
 
 
 class FuseMonitor:
-    """Owns the CH347 adapter and the per-distributor poll loop."""
+    """Owns the CH347 adapter and the poll loop."""
+
+    ADAPTER_WAS_LOST = object()
 
     def __init__(self, bus, config: Config):
         self.config = config
         self.adapter = None
         self._adapter_error_logged = False
         connection = "CH347 HID-I2C (%s)" % (config.hidraw_device or "auto")
-        self.services = [
-            DistributorService(bus, letter, config.fuse_counts[letter],
-                               connection)
-            for letter in config.letters
-        ]
+        self.service = LynxBatteryService(bus, config, connection)
 
     def start(self) -> None:
         self._poll()
@@ -325,6 +383,7 @@ class FuseMonitor:
         self._adapter_error_logged = False
         log.info("CH347 adapter opened on %s at %d Hz",
                  self.adapter.transport.path, self.config.i2c_speed_hz)
+        self.service.adapter_found()
         return True
 
     def _drop_adapter(self, log_it: bool = True) -> None:
@@ -337,27 +396,26 @@ class FuseMonitor:
         self.adapter = None
         if log_it:
             log.warning("CH347 adapter lost; will retry")
-        for svc in self.services:
-            svc.mark_disconnected()
+        self.service.adapter_lost()
 
     # ── poll loop ───────────────────────────────────────────────────────
 
     def _poll(self) -> bool:
         if not self._ensure_adapter():
-            for svc in self.services:
-                svc.comm_failure()
+            for letter in self.config.letters:
+                self.service.comm_failure(letter)
             return True
-        for svc in self.services:
+        for letter in self.config.letters:
             try:
-                raw = self.adapter.i2c_read(svc.address, 1)[0]
+                raw = self.adapter.i2c_read(ADDRESSES[letter], 1)[0]
             except I2CNackError:
-                svc.comm_failure()
+                self.service.comm_failure(letter)
             except (CH347Error, OSError) as e:
                 log.warning("adapter I/O failed: %s", e)
                 self._drop_adapter()
                 return True
             else:
-                svc.update(raw)
+                self.service.update(letter, raw)
         return True
 
 

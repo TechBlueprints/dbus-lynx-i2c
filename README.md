@@ -119,35 +119,43 @@ Protocol sources: WCH's *CH347 Application Development Manual* (in the [Waveshar
 
 One deviation from the original plan: the CH347's I2C clock is limited to exactly 20/100/400/750 kHz, so the community-proven ~50 kHz is not available. The default is **20 kHz** (closest rate at or below); `i2c_speed_hz = 100000` is a config option once the bus is proven.
 
-### D-Bus services
+### D-Bus service — mirrors the Lynx Smart BMS
 
-One service per distributor, digital-input style (following the
-`dbus-digitalinputs` conventions — ProductId `0xA166`, `/State` 8=OK/9=Alarm,
-`/Alarm` 0/2 — so the GX device list and notifications render it natively):
+The service publishes **exactly the distributor schema the Lynx Smart BMS
+uses** (Venus wiki `dbus.md` "Lynx Smart BMS" section; rendered by gui-v2's
+`PageLynxDistributorList.qml`/`FuseInfo.qml`), so the GX shows the same
+native **Fuses** pages a real BMS gets — per-distributor status, per-fuse
+names and blown states — with no custom GUI work:
 
 ```
-com.victronenergy.digitalinput.lynx_distributor_a   (DeviceInstance 100 + index)
+com.victronenergy.battery.lynx_i2c          (one service for the whole chain,
+                                             DeviceInstance 200)
 ```
 
 | Path | Meaning |
 |------|---------|
-| `/State` | 8 = OK, 9 = Alarm (any monitored fuse blown, or busbar unpowered) |
-| `/Alarm` | 0 = ok, 2 = alarm — drives GX/VRM notifications; gated by `/Settings/AlarmSetting` |
-| `/InputState` | 0/1 mirror of the alarm condition |
-| `/Connected` | 0 when the distributor stops ACKing (3 consecutive polls) or the adapter is unplugged |
-| `/Distributor/StatusByte` | Raw status byte (for the empirical phase and debugging) |
-| `/Distributor/NoBusSupply` | 0/1 — the 0x02 bit |
-| `/Fuses/1..4/Blown` | 0/1 per populated position, invalid for unpopulated ones |
-| `/Count` | OK→Alarm transitions since service start |
-| `/CustomName`, `/Settings/AlarmSetting` | Writable, persisted via `com.victronenergy.settings` |
+| `/NrOfDistributors` | Number of configured distributors — makes the GX "Fuses" menu appear |
+| `/Distributor/<A-D>/Status` | 0=Not available, 1=Connected, 2=No bus power (the 0x02 bit), 3=Communications lost (3 failed polls or adapter unplugged) |
+| `/Distributor/<A-D>/Alarms/ConnectionLost` | 0=Ok, 2=Alarm |
+| `/Distributor/<A-D>/Fuse/<0-3>/Name` | Fuse label (0-indexed on D-Bus, shown 1-indexed); set via `fuse_names_<letter>` in config, 16-byte BMS firmware limit |
+| `/Distributor/<A-D>/Fuse/<0-3>/Status` | 0=Not available, 1=Not used (unpopulated positions), 2=Ok, 3=Blown |
+| `/Distributor/<A-D>/Fuse/<0-3>/Alarms/Blown` | 0=Ok, 2=Alarm |
+| `/Alarms/FuseBlown` | 0=Ok, 2=Alarm — any blown fuse on any distributor; the battery-alarms path VRM/GX know |
+| `/CustomName` | Writable, persisted via `com.victronenergy.settings` |
 
-A dead bus deliberately does **not** clear an active alarm — `/Connected`
-drops but `/State`/`/Alarm` hold their last value.
+On communications loss, fuse `/Status` values go to 0 (Not available — the
+GX fuse page shows "No information available", as with a real BMS) but any
+active `/Alarms/Blown` and `/Alarms/FuseBlown` are deliberately **held** —
+a dead bus must not silently clear a fuse alarm.
 
-> The digitalinput service class is provisional (the "digital-input-style
-> vs. generic" question): it is the one class where a custom ok/alarm
-> device renders natively in the GX UI, but what VRM makes of it still
-> needs to be seen on real hardware.
+**Why a battery service?** The fuse UI in gui-v2 only exists on battery
+pages — `/NrOfDistributors > 0` on a battery service is what makes the
+"Fuses" menu appear. The service publishes no `/Dc/*`, `/Soc` or `/Info/*`
+paths, so systemcalc's battery auto-selection prefers any real
+BMS/shunt (those carry `/Info/MaxChargeVoltage` and lower device
+instances; ours defaults to 200). If your system has no other battery
+service at all, pin the right monitor in **Settings → System setup →
+Battery monitor**.
 
 ### Bring-up (first day with hardware)
 
