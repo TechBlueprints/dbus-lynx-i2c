@@ -1,0 +1,11 @@
+#!/bin/sh
+echo "*** starting dbus-lynx-i2c ***"
+exec 2>&1
+. /etc/profile.d/profile.sh
+
+# Brief delay on restart to allow D-Bus name release from previous instance
+sleep 3
+
+echo "Starting Lynx Distributor fuse monitor service..."
+cd /data/apps/dbus-lynx-i2c
+exec python3 -u dbus-lynx-i2c.py

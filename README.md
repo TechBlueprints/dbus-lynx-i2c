@@ -2,7 +2,7 @@
 
 Venus OS D-Bus service for **Victron Lynx Distributor fuse monitoring** on a Cerbo GX — without a Lynx Smart BMS. A USB-I2C adapter (Waveshare CH347) plugged into the Cerbo reads each distributor's fuse-status byte over the RJ10 I2C bus and publishes it to D-Bus so blown fuses surface on the GX display and VRM.
 
-> **Status:** hardware validated on paper, adapter ordered; driver not yet written. This README currently documents the complete hardware design. Software (CH347-HID I2C driver, poller, D-Bus service) lands next.
+> **Status:** hardware validated on paper, adapter ordered; driver not yet written. This README documents the complete hardware design; repo scaffolding (license, service files, install/enable/disable scripts, `velib_python` submodule) is in place. Software (CH347-HID I2C driver, poller, D-Bus service) lands next.
 
 ## Why
 
@@ -110,7 +110,86 @@ Pre-flight: with the adapter on USB and nothing else connected, verify ~5V acros
 1. **CH347 HID-I2C driver** (pure Python, stdlib only — no pip on Venus): open `/dev/hidraw*`, speak the CH347 I2C command protocol (public: WCH's *CH347 Application Development Manual* in the [Waveshare demo package](https://files.waveshare.com/wiki/USB-TO-UART-I2C-SPI-JTAG/USB-TO-UART-I2C-SPI-JTAG-Demo.zip); open-source reference: [ch347-hidapi](https://github.com/MeimeiZ/ch347-hidapi)). Configure 50 kHz (falls in CH347 standard-mode class), read 1 byte from 0x08/0x09.
 2. **Empirical verification**: pull each fuse in turn, record the byte, pin down the bit order (community sources conflict slightly).
 3. **Poller + D-Bus service** via `velib_python`: one service per distributor, fuse states + alarm paths so VRM raises notifications. Exact D-Bus service class (digital-input-style vs. generic) to be settled against what systemcalc/VRM will display.
-4. **Packaging**: `/data/dbus-lynx-i2c/`, `rc.local` hook, install script.
+4. ~~**Packaging**: `/data/apps/dbus-lynx-i2c/`, `rc.local` hook, install script.~~ Done — see below.
+
+## Installation
+
+> ⚠️ The driver is not yet implemented — installing today registers a service
+> that idles with a "not yet implemented" log line. The plumbing below is in
+> place so the software drops straight in once the hardware arrives.
+
+### One-Line Remote Install
+
+```bash
+ssh root@<cerbo-ip> "curl -fsSL https://raw.githubusercontent.com/TechBlueprints/dbus-lynx-i2c/main/install.sh | bash"
+```
+
+### Manual Installation
+
+```bash
+ssh root@<cerbo-ip>
+cd /data/apps
+git clone --recurse-submodules https://github.com/TechBlueprints/dbus-lynx-i2c.git
+cd dbus-lynx-i2c
+bash enable.sh
+```
+
+If you cloned without `--recurse-submodules`, initialize them manually:
+
+```bash
+git submodule update --init --recursive
+```
+
+The install lives under `/data` so it survives Venus OS firmware updates;
+`enable.sh` hooks itself into `/data/rc.local` so the daemontools service
+symlink is recreated on every boot. `disable.sh` reverses everything.
+
+## Configuration
+
+Optional: copy `config.default.ini` to `config.ini` (git-ignored, survives
+updates) to customize:
+
+```ini
+[DEFAULT]
+distributors = A,B
+poll_interval = 5
+```
+
+See [config.default.ini](config.default.ini) for all settings (distributor
+letters/addresses, populated fuse counts, poll interval, hidraw device
+override, I2C speed).
+
+## Service Management
+
+```bash
+svc -u /service/dbus-lynx-i2c  # Start
+svc -d /service/dbus-lynx-i2c  # Stop
+svc -t /service/dbus-lynx-i2c  # Restart
+svstat /service/dbus-lynx-i2c  # Status
+tail -f /var/log/dbus-lynx-i2c/current | tai64nlocal  # Logs
+```
+
+## Repository Layout
+
+| Path | Purpose |
+|------|---------|
+| `dbus-lynx-i2c.py` | Main service (placeholder until the driver lands) |
+| `service/run`, `service/log/run` | daemontools service + multilog logging |
+| `install.sh` | Remote installer (clone/update, submodules, enable, start) |
+| `enable.sh` / `disable.sh` | Hook/unhook the service and `/data/rc.local` entry |
+| `config.default.ini` | Configuration template (copy to `config.ini`) |
+| `ext/velib_python/` | Victron D-Bus helper library (git submodule) |
+| `tests/` | pytest suite (protocol decode tests land with the driver) |
+
+## Third-Party Software
+
+This project includes [velib_python](https://github.com/victronenergy/velib_python)
+by Victron Energy BV as a git submodule at `ext/velib_python/`, licensed under
+the MIT License — see [`ext/velib_python/LICENSE`](ext/velib_python/LICENSE).
+
+## License
+
+Apache License 2.0 - see [LICENSE](LICENSE)
 
 ## References
 
