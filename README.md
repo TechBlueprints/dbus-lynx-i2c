@@ -140,7 +140,7 @@ The service is three pure-Python-stdlib modules (no pip on Venus OS):
 
 Protocol sources: WCH's *CH347 Application Development Manual* (in the [Waveshare demo package](https://files.waveshare.com/wiki/USB-TO-UART-I2C-SPI-JTAG/USB-TO-UART-I2C-SPI-JTAG-Demo.zip)) cross-checked against two open-source implementations: [i2cy/CH347-HIDAPI](https://github.com/i2cy/CH347-HIDAPI) (Python) and [serfreeman1337/go-ch347](https://github.com/serfreeman1337/go-ch347) (Go, built from USB captures).
 
-One deviation from the original plan: the CH347's I2C clock is limited to exactly 20/100/400/750 kHz, so the community-proven ~50 kHz is not available. The default is **20 kHz** (closest rate at or below); `i2c_speed_hz = 100000` is a config option once the bus is proven.
+One deviation from the original plan: the CH347's I2C clock is limited to exactly 20/100/400/750 kHz, so the ESPHome-proven ~50 kHz is not available. The default is the conservative **20 kHz**; `i2c_speed_hz = 100000` is also community-proven — twam's FT232H setup ran the bus at pyftdi's default 100 kHz on real hardware.
 
 ### D-Bus service — mirrors the Lynx Smart BMS
 
