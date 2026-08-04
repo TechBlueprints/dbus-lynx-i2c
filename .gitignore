@@ -30,3 +30,6 @@ Thumbs.db
 
 # Local config (site-specific: distributor count, poll interval, device override)
 config.ini
+
+# Mock-mode live state (see mock_adapter.py)
+mock-state.json

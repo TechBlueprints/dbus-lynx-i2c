@@ -2,7 +2,7 @@
 
 Venus OS D-Bus service for **Victron Lynx Distributor fuse monitoring** on a Cerbo GX — without a Lynx Smart BMS. A USB-I2C adapter (Waveshare CH347) plugged into the Cerbo reads each distributor's fuse-status byte over the RJ10 I2C bus and publishes it to D-Bus so blown fuses surface on the GX display and VRM.
 
-> **Status:** hardware validated on paper, adapter ordered; software written but **not yet validated on hardware**. The CH347 HID-I2C driver, status-byte decoder, poller and D-Bus service are implemented with unit tests; the fuse-bit encoding and the CH347 framing still need empirical verification the day the adapter and distributors are in hand (see [Bring-up](#bring-up-first-day-with-hardware)).
+> **Status:** software validated end-to-end on a Cerbo GX (Venus 3.x, gui-v2) in **mock mode** — device list entry, native Fuses pages with custom fuse names, "Fuse blown" / "No power on busbar" / "Connection lost" states, GX alarm notifications (including per-fuse alarms named after the fuse, and the audible buzzer), recovery, and adapter hot-unplug all confirmed live. Only **hardware validation** remains: the CH347 HID framing and the fuse-bit encoding, the day the adapter and distributors are in hand (see [Bring-up](#bring-up-first-day-with-hardware)).
 
 ## Why
 
@@ -195,6 +195,28 @@ python3 lynx_distributor.py --watch A
 ```
 
 If the bit order differs from the documented encoding (`0x10/0x20/0x40/0x80` = fuse 1-4, `0x02` = no supply), fix `FUSE_BITS`/`BIT_NO_SUPPLY` in [lynx_distributor.py](lynx_distributor.py) and the unit tests, and note the finding here.
+
+### Mock mode (no hardware)
+
+`mock = true` in `config.ini` replaces the CH347 with a simulator driven
+by a live-editable JSON file, so the whole service — D-Bus schema, GX
+pages, alarms, buzzer — runs on a real Cerbo with no adapter attached:
+
+```bash
+cd /data/apps/dbus-lynx-i2c
+echo '{"A": "0x10", "B": "0x02"}' > mock-state.json   # A: fuse 1 blown; B: busbar unpowered
+echo '{"A": "0x00", "B": "nack"}' > mock-state.json   # B stops ACKing -> comms lost
+echo '{"A": "error"}'             > mock-state.json   # whole adapter drops off USB
+echo '{}'                         > mock-state.json   # all OK
+```
+
+The state file is re-read every poll; see [mock_adapter.py](mock_adapter.py)
+for the full syntax. This is how the GX-side behavior was validated —
+observed live: venus-platform raises properly-worded notifications for
+`/Alarms/FuseBlown` ("Fuse blown"), per-fuse `/Fuse/n/Alarms/Blown`
+("Fuse blown", with the fuse's *name* as the value), and
+`/Distributor/X/Alarms/ConnectionLost` ("Distributor X connection lost"),
+and sounds the GX buzzer for each.
 
 ### Tests
 

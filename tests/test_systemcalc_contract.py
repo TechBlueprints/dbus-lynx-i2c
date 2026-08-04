@@ -157,11 +157,20 @@ def test_dvcc_never_sees_us_as_bms(svc):
 # ── 4. the dropdown, eyes open ─────────────────────────────────────────────
 
 
-def test_we_do_appear_in_battery_monitor_dropdown(svc):
+def test_we_do_appear_in_battery_monitor_dropdown(lynx_service, monkeypatch,
+                                                  tmp_path):
     # Unavoidable without breaking the device list; harmless unless a
-    # user manually selects us.
-    assert connected_service_filter(svc)
-    assert readable_service_name(svc) == \
+    # user manually selects us. /Connected (and thus dropdown presence)
+    # requires the adapter to have completed at least one transfer.
+    monkeypatch.setattr(lynx_service, "VeDbusService", FakeVeDbusService)
+    monkeypatch.setattr(lynx_service, "SettingsDevice", FakeSettingsDevice)
+    (tmp_path / "config.ini").write_text("[DEFAULT]\ndistributors = A\n")
+    service = lynx_service.LynxBatteryService(
+        None, lynx_service.load_config(str(tmp_path)), "CH347 HID-I2C (auto)")
+    assert not connected_service_filter(service._service)  # before first poll
+    service.adapter_found()
+    assert connected_service_filter(service._service)
+    assert readable_service_name(service._service) == \
         "Lynx Distributor Monitor on CH347 HID-I2C (auto)"
 
 

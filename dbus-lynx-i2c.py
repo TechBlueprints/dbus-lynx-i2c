@@ -91,13 +91,14 @@ class ConfigError(Exception):
 
 class Config:
     def __init__(self, letters, fuse_counts, fuse_names, poll_interval,
-                 i2c_speed_hz, hidraw_device):
+                 i2c_speed_hz, hidraw_device, mock=False):
         self.letters = letters
         self.fuse_counts = fuse_counts  # {letter: populated fuse positions}
         self.fuse_names = fuse_names    # {letter: [name, ...] padded to MAX_FUSES}
         self.poll_interval = poll_interval
         self.i2c_speed_hz = i2c_speed_hz
         self.hidraw_device = hidraw_device
+        self.mock = mock
 
 
 def _parse_fuse_names(sec, letters):
@@ -179,8 +180,13 @@ def load_config(base_dir: str) -> Config:
 
     hidraw_device = sec.get("hidraw_device", "").strip() or None
 
+    try:
+        mock = sec.getboolean("mock", False)
+    except ValueError:
+        raise ConfigError("mock must be a boolean")
+
     return Config(letters, fuse_counts, fuse_names, poll_interval,
-                  i2c_speed_hz, hidraw_device)
+                  i2c_speed_hz, hidraw_device, mock=mock)
 
 
 def distributor_status_value(status: FuseStatus) -> int:
@@ -240,7 +246,8 @@ class LynxBatteryService:
                      writeable=True, onchangecallback=self._customname_written)
         svc.add_path("/FirmwareVersion", VERSION)
         svc.add_path("/HardwareVersion", None)
-        svc.add_path("/Connected", 1)
+        # 0 until the adapter proves itself with a completed transfer.
+        svc.add_path("/Connected", 0)
 
         svc.add_path("/NrOfDistributors", len(config.letters))
         svc.add_path("/Alarms/FuseBlown", ALARM_OK)
@@ -351,13 +358,18 @@ class LynxBatteryService:
 class FuseMonitor:
     """Owns the CH347 adapter and the poll loop."""
 
-    ADAPTER_WAS_LOST = object()
-
     def __init__(self, bus, config: Config):
         self.config = config
         self.adapter = None
-        self._adapter_error_logged = False
-        connection = "CH347 HID-I2C (%s)" % (config.hidraw_device or "auto")
+        # Logging is transition-based: a wedged adapter (opens fine, every
+        # read fails) must not emit a warning burst on each poll cycle.
+        self._outage_logged = False
+        self._mock_logged = False
+        self._healthy = False  # a transfer succeeded on the current adapter
+        if config.mock:
+            connection = "Mock adapter (no hardware)"
+        else:
+            connection = "CH347 HID-I2C (%s)" % (config.hidraw_device or "auto")
         self.service = LynxBatteryService(bus, config, connection)
 
     def start(self) -> None:
@@ -372,21 +384,34 @@ class FuseMonitor:
     def _ensure_adapter(self) -> bool:
         if self.adapter is not None:
             return True
+        if self.config.mock:
+            from mock_adapter import MockAdapter, STATE_FILENAME
+            self.adapter = MockAdapter(os.path.join(BASE_DIR, STATE_FILENAME))
+            if not self._mock_logged:
+                log.warning("MOCK MODE: simulating distributors from %s",
+                            self.adapter.state_path)
+                self._mock_logged = True
+            return True
         try:
             self.adapter = CH347I2C.open(
                 path=self.config.hidraw_device,
                 speed_hz=self.config.i2c_speed_hz)
         except (CH347Error, OSError) as e:
-            if not self._adapter_error_logged:
-                log.warning("CH347 adapter unavailable: %s (retrying every "
-                            "poll)", e)
-                self._adapter_error_logged = True
+            if not self._outage_logged:
+                log.warning("CH347 adapter unavailable: %s (will keep "
+                            "retrying)", e)
+                self._outage_logged = True
             return False
-        self._adapter_error_logged = False
-        log.info("CH347 adapter opened on %s at %d Hz",
-                 self.adapter.transport.path, self.config.i2c_speed_hz)
-        self.service.adapter_found()
         return True
+
+    def _mark_healthy(self) -> None:
+        """A transfer completed (data or NACK): the adapter itself works."""
+        if not self._healthy:
+            self._healthy = True
+            self._outage_logged = False
+            log.info("CH347 adapter OK on %s (I2C %d Hz)",
+                     self.adapter.transport.path, self.config.i2c_speed_hz)
+            self.service.adapter_found()
 
     def _drop_adapter(self, log_it: bool = True) -> None:
         if self.adapter is None:
@@ -396,8 +421,9 @@ class FuseMonitor:
         except OSError:
             pass
         self.adapter = None
-        if log_it:
+        if log_it and self._healthy:
             log.warning("CH347 adapter lost; will retry")
+        self._healthy = False
         self.service.adapter_lost()
 
     # ── poll loop ───────────────────────────────────────────────────────
@@ -411,12 +437,18 @@ class FuseMonitor:
             try:
                 raw = self.adapter.i2c_read(ADDRESSES[letter], 1)[0]
             except I2CNackError:
+                # The USB round-trip worked; only the distributor is silent.
+                self._mark_healthy()
                 self.service.comm_failure(letter)
             except (CH347Error, OSError) as e:
-                log.warning("adapter I/O failed: %s", e)
+                if self._healthy or not self._outage_logged:
+                    log.warning("adapter I/O failed: %s (will keep "
+                                "retrying)", e)
+                    self._outage_logged = True
                 self._drop_adapter()
                 return True
             else:
+                self._mark_healthy()
                 self.service.update(letter, raw)
         return True
 
