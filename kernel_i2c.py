@@ -207,7 +207,13 @@ def _cli() -> int:
             return 0
 
         if args.read:
-            data = dev.i2c_read(int(args.read, 0), args.length)
+            addr = int(args.read, 0)
+            try:
+                data = dev.i2c_read(addr, args.length)
+            except I2CNackError:
+                print("no ACK from 0x%02X (device absent or bus problem)"
+                      % addr)
+                return 1
             print(" ".join("%02X" % b for b in data))
             return 0
 

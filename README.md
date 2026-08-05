@@ -2,7 +2,7 @@
 
 Venus OS D-Bus service for **Victron Lynx Distributor fuse monitoring** on a Cerbo GX — without a Lynx Smart BMS. A USB-I2C adapter (Waveshare CH347) plugged into the Cerbo reads each distributor's fuse-status byte over the RJ10 I2C bus and publishes it to D-Bus so blown fuses surface on the GX display and VRM.
 
-> **Status:** software validated end-to-end on a Cerbo GX (Venus 3.x, gui-v2) in **mock mode** — device list entry, native Fuses pages with custom fuse names, "Fuse blown" / "No power on busbar" / "Connection lost" states, GX alarm notifications (including per-fuse alarms named after the fuse, and the audible buzzer), recovery, and adapter hot-unplug all confirmed live. Only **hardware validation** remains: the CH347 HID framing and the fuse-bit encoding, the day the adapter and distributors are in hand (see [Bring-up](#bring-up-first-day-with-hardware)).
+> **Status:** software validated end-to-end on a Cerbo GX (Venus 3.x, gui-v2) in **mock mode** — device list entry, native Fuses pages with custom fuse names, all fault states, GX alarm notifications (including per-fuse alarms named after the fuse, and the audible buzzer), recovery, and adapter hot-unplug all confirmed live. **CH347 adapter validated on the real hardware**: enumerates in M2 as `1a86:55dc`, hidraw interface auto-detect works, and full-bus scans complete with clean NACKs at both 20 kHz and 100 kHz — the HID framing and I2C engine are proven. Only the **distributor side** remains: RJ10 wiring (with the pre-flight meter checks) and the fuse-bit verification (see [Bring-up](#bring-up-first-day-with-hardware)).
 
 ## Why
 
