@@ -239,6 +239,7 @@ class LynxBatteryService:
         self.config = config
         self.fail_counts = {letter: 0 for letter in config.letters}
         self._last_raw = {letter: None for letter in config.letters}
+        self._pending = {}  # letter -> unconfirmed changed/corrupt byte
 
         default_name = "Lynx Distributor Monitor"
         settings_base = "/Settings/Devices/lynx_i2c"
@@ -325,13 +326,34 @@ class LynxBatteryService:
     # ── poll results ────────────────────────────────────────────────────
 
     def update(self, letter: str, raw: int) -> None:
-        """Publish a successfully-read status byte for one distributor."""
-        self.fail_counts[letter] = 0
+        """Publish a successfully-read status byte for one distributor.
+
+        Two guards against corrupted bus transactions (observed in the
+        field: a one-poll 0x3F glitch on an otherwise healthy bus):
+        a byte with impossible bits is discarded as a failed poll, and a
+        *changed* byte must repeat on the next poll before it publishes,
+        so a single glitch can never flap state or raise a false alarm.
+        A real fuse event still publishes within two poll intervals.
+        """
         num_fuses = self.config.fuse_counts[letter]
         status = decode(raw, num_fuses)
+        if status.unknown_bits:
+            if raw != self._pending.get(letter):
+                log.warning("distributor %s: corrupt read 0x%02X (impossible "
+                            "bits 0x%02X), discarding",
+                            letter, raw, status.unknown_bits)
+            self._pending[letter] = raw
+            self.comm_failure(letter)
+            return
+        self.fail_counts[letter] = 0
+        last = self._last_raw[letter]
+        if last is not None and raw != last and self._pending.get(letter) != raw:
+            self._pending[letter] = raw  # changed: await confirmation
+            return
+        self._pending.pop(letter, None)
         if raw != self._last_raw[letter]:
             log.info("distributor %s: %s", letter, describe(status))
-            self._last_raw[letter] = raw
+        self._last_raw[letter] = raw
         base = "/Distributor/%s" % letter
         with self._service as s:
             s["%s/Status" % base] = distributor_status_value(status)
@@ -362,6 +384,7 @@ class LynxBatteryService:
 
     def _mark_comms_lost(self, letter: str) -> None:
         self._last_raw[letter] = None
+        self._pending.pop(letter, None)
         base = "/Distributor/%s" % letter
         with self._service as s:
             s["%s/Status" % base] = DIST_COMMS_LOST

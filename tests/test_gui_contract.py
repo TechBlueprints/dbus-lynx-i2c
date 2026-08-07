@@ -250,6 +250,12 @@ def test_all_ok_renders_ok(env):
     assert gx_battery_alarms_fuse_blown(env.svc) == 0
 
 
+def poll_change(env):
+    """Changed bytes publish after confirmation on the next poll."""
+    env.monitor._poll()
+    env.monitor._poll()
+
+
 def test_fuse_names_and_not_used_rows(env):
     env.monitor._poll()
     # A: 4 populated, custom names for 1-2 (config fuse_names_a)
@@ -258,7 +264,7 @@ def test_fuse_names_and_not_used_rows(env):
     # B: only 2 populated -> 3/4 show "Not used" even though the wire
     # reads those positions as blown (0xC0 bits float high when empty)
     env.adapter.responses[ADDRESSES["B"]] = 0xC0
-    env.monitor._poll()
+    poll_change(env)
     assert gx_fuse_detail_page(env.svc, "B") == [
         ("Fuse 1", "Ok"), ("Fuse 2", "Ok"),
         ("Fuse 3", "Not used"), ("Fuse 4", "Not used")]
@@ -268,7 +274,7 @@ def test_fuse_names_and_not_used_rows(env):
 
 def test_single_blown_fuse(env):
     env.adapter.responses[ADDRESSES["A"]] = 0x10  # fuse 1
-    env.monitor._poll()
+    poll_change(env)
     assert gx_distributor_row(env.svc, "A") == (True, "Fuse blown")
     assert gx_fuse_detail_page(env.svc, "A")[0] == ("Inverter", "Blown")
     assert env.svc.paths["/Distributor/A/Fuse/0/Alarms/Blown"] == 2
@@ -279,13 +285,13 @@ def test_single_blown_fuse(env):
 
 def test_multiple_blown_fuses_counted(env):
     env.adapter.responses[ADDRESSES["A"]] = 0x30  # fuses 1+2
-    env.monitor._poll()
+    poll_change(env)
     assert gx_distributor_row(env.svc, "A") == (True, "2 fuse(s) blown")
 
 
 def test_no_bus_power(env):
     env.adapter.responses[ADDRESSES["A"]] = 0x02
-    env.monitor._poll()
+    poll_change(env)
     assert gx_distributor_row(env.svc, "A") == (True, "No power on busbar")
     # Detail page shows the "no information" header (status != 1)
     assert gx_fuse_detail_page(env.svc, "A") is None
@@ -297,7 +303,7 @@ def test_no_bus_power_never_raises_spurious_fuse_alarms(env):
     # With the busbar unpowered the fuse bits are garbage; 0xF2 (all fuse
     # bits + no-supply) must not alarm or show blown fuses.
     env.adapter.responses[ADDRESSES["A"]] = 0xF2
-    env.monitor._poll()
+    poll_change(env)
     assert gx_distributor_row(env.svc, "A") == (True, "No power on busbar")
     for i in range(4):
         assert env.svc.paths["/Distributor/A/Fuse/%d/Status" % i] == 0
@@ -305,7 +311,7 @@ def test_no_bus_power_never_raises_spurious_fuse_alarms(env):
     assert gx_battery_alarms_fuse_blown(env.svc) == 0
     # Power returns with a genuinely blown fuse -> alarm resumes correctly
     env.adapter.responses[ADDRESSES["A"]] = 0x10
-    env.monitor._poll()
+    poll_change(env)
     assert gx_distributor_row(env.svc, "A") == (True, "Fuse blown")
     assert gx_battery_alarms_fuse_blown(env.svc) == 2
 
@@ -329,7 +335,7 @@ def test_comms_lost_after_three_nacks(env):
 
 def test_blown_alarm_held_through_comms_loss(env):
     env.adapter.responses[ADDRESSES["A"]] = 0x10
-    env.monitor._poll()
+    poll_change(env)
     assert gx_battery_alarms_fuse_blown(env.svc) == 2
     env.adapter.responses[ADDRESSES["A"]] = I2CNackError(ADDRESSES["A"])
     for _ in range(3):
@@ -360,3 +366,49 @@ def test_adapter_unplug_and_replug(env):
     env.monitor._poll()
     assert env.svc.paths["/Connected"] == 1
     assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+
+
+def test_corrupt_byte_discarded(env):
+    # Field-observed glitch: one poll returned 0x3F (impossible bits 0x0D)
+    # on an otherwise healthy bus. Must not flap state or alarm.
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    env.adapter.responses[ADDRESSES["A"]] = 0x3F
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 0
+    env.adapter.responses[ADDRESSES["A"]] = 0x00
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+
+
+def test_persistent_corrupt_reads_become_comms_lost(env):
+    env.monitor._poll()
+    env.adapter.responses[ADDRESSES["A"]] = 0x3F
+    for _ in range(3):
+        env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Connection lost")
+
+
+def test_single_glitch_byte_never_alarms(env):
+    # A one-poll 0x30 ("2 fuses blown", plausible bits) must be debounced.
+    env.monitor._poll()
+    env.adapter.responses[ADDRESSES["A"]] = 0x30
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 0
+    env.adapter.responses[ADDRESSES["A"]] = 0x00
+    env.monitor._poll()
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 0
+
+
+def test_real_change_publishes_after_confirmation(env):
+    env.monitor._poll()
+    env.adapter.responses[ADDRESSES["A"]] = 0x10
+    env.monitor._poll()  # first sighting: pending
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    env.monitor._poll()  # confirmed
+    assert gx_distributor_row(env.svc, "A") == (True, "Fuse blown")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 2
