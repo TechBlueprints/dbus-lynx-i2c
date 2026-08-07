@@ -2,7 +2,9 @@
 
 Venus OS D-Bus service for **Victron Lynx Distributor fuse monitoring** on a Cerbo GX — without a Lynx Smart BMS. A USB-I2C adapter (Waveshare CH347) plugged into the Cerbo reads each distributor's fuse-status byte over the RJ10 I2C bus and publishes it to D-Bus so blown fuses surface on the GX display and VRM.
 
-> **Status:** software validated end-to-end on a Cerbo GX (Venus 3.x, gui-v2) in **mock mode** — device list entry, native Fuses pages with custom fuse names, all fault states, GX alarm notifications (including per-fuse alarms named after the fuse, and the audible buzzer), recovery, and adapter hot-unplug all confirmed live. **CH347 adapter validated on the real hardware**: enumerates in M2 as `1a86:55dc`, hidraw interface auto-detect works, and full-bus scans complete with clean NACKs at both 20 kHz and 100 kHz — the HID framing and I2C engine are proven. Only the **distributor side** remains: RJ10 wiring (with the pre-flight meter checks) and the fuse-bit verification (see [Bring-up](#bring-up-first-day-with-hardware)).
+> **Status: live in production.** Running on a Cerbo GX against two real Lynx Distributors (A+B daisy-chained, CH347 M2/HID, 20 kHz). The fuse-bit encoding is **empirically confirmed** — an unseated fuse in position 1 read `0x10` and cleared to `0x00` on reseat — and the full GX experience (native Fuses pages, alarms, buzzer) was previously validated end-to-end in mock mode. Battery auto-select verified unaffected on a system with a real battery monitor.
+>
+> Two hardware lessons from bring-up, for anyone repeating this: **(1)** verify the 5 V *under load* at the distributor end, not just open-circuit — a marginal crimp passed unloaded checks but browned out the distributors' micros, freezing them in an all-LEDs-red + amber-power pose where they never boot and never ACK; **(2)** a browned-out distributor invalidates SDA/SCL swap testing — fix power first, then retest data-line orientation.
 
 ## Why
 
