@@ -223,10 +223,10 @@ python3 lynx_distributor.py --watch A
 
 If the bit order differs from the documented encoding (`0x10/0x20/0x40/0x80` = fuse 1-4, `0x02` = no supply), fix `FUSE_BITS`/`BIT_NO_SUPPLY` in [lynx_distributor.py](lynx_distributor.py) and the unit tests, and note the finding here.
 
-### Truncated reads (diagnosed)
+### Truncated reads (diagnosed and fixed)
 
-In production this bus produces a truncated read roughly once every 20–30
-minutes, on both distributors equally. It is **not** electrical noise and
+This bus originally produced a truncated read roughly once every 20–30
+minutes, on both distributors equally. It was **not** electrical noise and
 **not** a driver bug — both were tested and ruled out:
 
 - **Raw HID frames are well-formed.** A good read returns `02 00 | 01 | 00`
@@ -244,15 +244,34 @@ minutes, on both distributors equally. It is **not** electrical noise and
   CH347's hardware I2C engine does not honor (every working community build
   uses a master that does: ESP32 `Wire`, pyftdi MPSSE).
 
-**Detection is structural, not heuristic.** A truncated byte always shifts a
-`1` into bit 0, and bit 0 is not a valid protocol bit, so the validity check
-catches this failure mode 100% of the time. Combined with intra-poll
-confirmation and the cross-poll change debounce, it cannot reach D-Bus.
+**The fix: clock the data byte fast, deliver the NACK slowly.** Corruption
+turns out to be non-monotonic in bus speed — 0.24% at 20 kHz, 0.76% at
+100 kHz, 0.005% at 400 kHz — because what matters is finishing the byte
+before the abort window, not going slower. Simply raising the bus clock
+does not work (the address phase NACKs exactly 50% of the time at 400 kHz
+and above), but the I2C speed opcode is part of the CH347 command stream,
+so `i2c_read_burst()` changes clock *mid-transaction*:
 
-**Do not raise the bus speed to "fix" it.** Measured per-distributor NACK
-rates: 20 kHz ≈ 0.1%, **100 kHz ≈ 50%, 400 kHz ≈ 50%, 750 kHz = 100%**, and
-inter-transaction delays up to 25 ms do not help. 20 kHz is the only healthy
-rate for this adapter/distributor combination.
+| Phase | Clock | Why |
+|---|---|---|
+| START + address | `i2c_speed_hz` (20 kHz) | the slave reliably catches it |
+| status byte, ACKed | `data_speed_hz` (750 kHz) | ~11 µs, beats the ~60 µs abort |
+| second byte + NACK, STOP | `i2c_speed_hz` (20 kHz) | a *fast* NACK is missed by the slave, which then keeps driving SDA and blocks the next transaction — this was the 50% NACK |
+
+Measured on the production bus: **39,096 reads, zero corrupt**, one
+transaction per read, NACK rate unchanged (baseline would give ~100). The
+truncations did not stop — they moved onto the discarded second byte, which
+still shows the old 2ⁿ−1 values at ~0.18%.
+
+That second byte is a bonus: every read returns the same status byte, so
+when the slow copy survives intact it cross-checks the fast one *inside a
+single transaction*. Set `data_speed_hz = 0` to disable and fall back to
+plain reads (the `kernel-i2c` backend does so automatically).
+
+**Detection remains as a backstop.** A truncated byte always shifts a `1`
+into bit 0, and bit 0 is not a valid protocol bit, so the validity check
+catches that failure mode 100% of the time, with the echo cross-check and
+the cross-poll change debounce behind it.
 
 If the rate ever climbs enough to matter, the **CP2112 fallback**
 (`adapter = kernel-i2c`, already implemented) is worth trying — the
