@@ -223,6 +223,41 @@ python3 lynx_distributor.py --watch A
 
 If the bit order differs from the documented encoding (`0x10/0x20/0x40/0x80` = fuse 1-4, `0x02` = no supply), fix `FUSE_BITS`/`BIT_NO_SUPPLY` in [lynx_distributor.py](lynx_distributor.py) and the unit tests, and note the finding here.
 
+### Truncated reads (diagnosed)
+
+In production this bus produces a truncated read roughly once every 20–30
+minutes, on both distributors equally. It is **not** electrical noise and
+**not** a driver bug — both were tested and ruled out:
+
+- **Raw HID frames are well-formed.** A good read returns `02 00 | 01 | 00`
+  (length 2, address ACKed, data `0x00`); a bad one returns `02 00 | 01 |
+  7F`. The adapter accurately reports what it sampled.
+- **The corrupt values are structured, never random.** 150 logged samples
+  were *all* of the form 2ⁿ−1 (`0x01 0x03 0x07 0x1F 0x3F 0x7F`) — the true
+  byte's leading bits followed by 1s. The distributor starts transmitting,
+  then **stops driving SDA mid-byte** and the pull-ups supply the rest.
+  Random noise would scatter across all 255 values.
+- **The abort is time-based, not bit-based.** At 20 kHz (50 µs/bit) it quits
+  after ~1 bit; at 100 kHz (10 µs/bit) after 6–7 bits — both ≈60 µs into the
+  byte. Something interrupts the distributor's microcontroller at a fixed
+  wall-clock delay: its own firmware interrupt, or clock stretching that the
+  CH347's hardware I2C engine does not honor (every working community build
+  uses a master that does: ESP32 `Wire`, pyftdi MPSSE).
+
+**Detection is structural, not heuristic.** A truncated byte always shifts a
+`1` into bit 0, and bit 0 is not a valid protocol bit, so the validity check
+catches this failure mode 100% of the time. Combined with intra-poll
+confirmation and the cross-poll change debounce, it cannot reach D-Bus.
+
+**Do not raise the bus speed to "fix" it.** Measured per-distributor NACK
+rates: 20 kHz ≈ 0.1%, **100 kHz ≈ 50%, 400 kHz ≈ 50%, 750 kHz = 100%**, and
+inter-transaction delays up to 25 ms do not help. 20 kHz is the only healthy
+rate for this adapter/distributor combination.
+
+If the rate ever climbs enough to matter, the promising fix is the **CP2112
+fallback** (`adapter = kernel-i2c`, already implemented) — the in-kernel
+driver honors clock stretching, which this adapter appears not to.
+
 ### Mock mode (no hardware)
 
 `mock = true` in `config.ini` replaces the CH347 with a simulator driven
