@@ -60,7 +60,7 @@ from ch347 import CH347I2C, CH347Error, I2CNackError, SPEED_LEVELS  # noqa: E402
 from lynx_distributor import (  # noqa: E402
     ADDRESSES, MAX_FUSES, FuseStatus, decode, describe)
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # Lynx Smart BMS distributor conventions (Venus wiki dbus.md + gui-v2
 # PageLynxDistributorList.qml / FuseInfo.qml):
@@ -282,6 +282,9 @@ class LynxBatteryService:
             svc.add_path("%s/Status" % base, DIST_NOT_AVAILABLE,
                          gettextcallback=self._status_text)
             svc.add_path("%s/Alarms/ConnectionLost" % base, ALARM_OK)
+            # Diagnostic: corrupt frames discarded by the validity guard
+            # (bus noise trend can be watched here instead of the logs).
+            svc.add_path("%s/CorruptReads" % base, 0)
             for i in range(MAX_FUSES):
                 svc.add_path("%s/Fuse/%d/Name" % (base, i),
                              config.fuse_names[letter][i],
@@ -343,6 +346,8 @@ class LynxBatteryService:
                             "bits 0x%02X), discarding",
                             letter, raw, status.unknown_bits)
             self._pending[letter] = raw
+            path = "/Distributor/%s/CorruptReads" % letter
+            self._service[path] = self._service[path] + 1
             self.comm_failure(letter)
             return
         self.fail_counts[letter] = 0
