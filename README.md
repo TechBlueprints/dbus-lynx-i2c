@@ -254,9 +254,32 @@ rates: 20 kHz ≈ 0.1%, **100 kHz ≈ 50%, 400 kHz ≈ 50%, 750 kHz = 100%**, an
 inter-transaction delays up to 25 ms do not help. 20 kHz is the only healthy
 rate for this adapter/distributor combination.
 
-If the rate ever climbs enough to matter, the promising fix is the **CP2112
-fallback** (`adapter = kernel-i2c`, already implemented) — the in-kernel
-driver honors clock stretching, which this adapter appears not to.
+If the rate ever climbs enough to matter, the **CP2112 fallback**
+(`adapter = kernel-i2c`, already implemented) is worth trying — the
+in-kernel driver honors clock stretching.
+
+**How other implementations handle this: they don't.** All five known
+projects — [twam/dbus-lynx-distributor](https://github.com/twam/dbus-lynx-distributor),
+[pulquero/dbus-i2c](https://github.com/pulquero/dbus-i2c),
+[jcollasius](https://github.com/jcollasius/esphome-victron-energy-lynx-distributor),
+[NightHawk32](https://github.com/NightHawk32/Lynx-Distributor-Gateway),
+and m66b's ESP32 build — decode the status byte straight into published
+state with no validity check, so a truncated read reports every fuse
+blown. Two caveats their designs imply:
+
+- twam's is the only other USB-bridge implementation, and pyftdi's
+  `clockstretching` option defaults to `False` (his `configure()` call
+  does not pass it), so his master does not honor stretching either. If
+  stretching is the cause, that setup is equally exposed but has no
+  detection. This is also why the clock-stretching diagnosis is *not*
+  proven: MCU-based masters honoring stretching would be immune to it
+  but not to slave-side ISR jitter, and we cannot yet distinguish the
+  two without a scope.
+- pulquero's poll wrapper returns `False` from its `GLib.timeout_add`
+  callback on any exception, which removes the timer — a single NACK
+  (≈0.1% here even at 20 kHz) stops his polling permanently until
+  restart. This driver retries indefinitely instead, pinned by a
+  contract test.
 
 ### Mock mode (no hardware)
 
