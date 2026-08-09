@@ -125,7 +125,17 @@ echo ""
 
 # Step 5: Start or restart service
 echo "Step 5: Starting service..."
-if svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q "up"; then
+
+# daemontools' svscan polls /service every few seconds; on a first install
+# the supervise directory does not exist yet, and svstat then prints
+# "unable to open supervise/ok" -- which contains the substring "up", so
+# the status test below must anchor on ": up " rather than "up".
+for _ in $(seq 1 15); do
+    [ -e "/service/$SERVICE_NAME/supervise/ok" ] && break
+    sleep 1
+done
+
+if svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q ": up "; then
     if [ "$NEEDS_RESTART" = true ]; then
         echo "Restarting service to apply updates..."
         svc -t "/service/$SERVICE_NAME"
