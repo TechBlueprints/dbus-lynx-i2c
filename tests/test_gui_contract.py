@@ -97,6 +97,8 @@ class FakeAdapter:
 
     def i2c_read(self, addr, nbytes):
         r = self.responses[addr]
+        if isinstance(r, list):
+            r = r.pop(0) if len(r) > 1 else r[0]
         if isinstance(r, Exception):
             raise r
         return bytes([r])
@@ -415,13 +417,37 @@ def test_real_change_publishes_after_confirmation(env):
 
 
 def test_corrupt_reads_counted_on_dbus(env):
+    # A persistently-corrupt byte burns the whole per-poll attempt budget.
+    per_poll = env.module.FuseMonitor.READ_ATTEMPTS
     env.monitor._poll()
     assert env.svc.paths["/Distributor/A/CorruptReads"] == 0
     env.adapter.responses[ADDRESSES["A"]] = 0x3F
     env.monitor._poll()
     env.monitor._poll()
-    assert env.svc.paths["/Distributor/A/CorruptReads"] == 2
+    assert env.svc.paths["/Distributor/A/CorruptReads"] == 2 * per_poll
     assert env.svc.paths["/Distributor/B/CorruptReads"] == 0
     env.adapter.responses[ADDRESSES["A"]] = 0x00
     env.monitor._poll()
-    assert env.svc.paths["/Distributor/A/CorruptReads"] == 2  # counter holds
+    assert env.svc.paths["/Distributor/A/CorruptReads"] == 2 * per_poll
+
+
+def test_intra_poll_disagreement_filtered(env):
+    # A corrupted-but-plausible byte (0x10, "fuse blown") in one
+    # transaction is out-voted within the same poll by two agreeing
+    # clean reads: no state change, no alarm, one counted discard.
+    env.monitor._poll()
+    env.adapter.responses[ADDRESSES["A"]] = [0x10, 0x00, 0x00]
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 0
+    assert env.svc.paths["/Distributor/A/CorruptReads"] == 1
+
+
+def test_noisy_poll_gives_up_without_publishing(env):
+    # Valid bytes that never agree exhaust the attempt budget: treated
+    # as a failed poll, state untouched.
+    env.monitor._poll()
+    env.adapter.responses[ADDRESSES["A"]] = [0x10, 0x00, 0x10, 0x00, 0x00]
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    assert gx_battery_alarms_fuse_blown(env.svc) == 0

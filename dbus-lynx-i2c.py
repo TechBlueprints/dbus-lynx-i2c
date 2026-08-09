@@ -240,6 +240,7 @@ class LynxBatteryService:
         self.fail_counts = {letter: 0 for letter in config.letters}
         self._last_raw = {letter: None for letter in config.letters}
         self._pending = {}  # letter -> unconfirmed changed/corrupt byte
+        self._last_corrupt = {}  # letter -> last logged corrupt byte
 
         default_name = "Lynx Distributor Monitor"
         settings_base = "/Settings/Devices/lynx_i2c"
@@ -341,13 +342,9 @@ class LynxBatteryService:
         num_fuses = self.config.fuse_counts[letter]
         status = decode(raw, num_fuses)
         if status.unknown_bits:
-            if raw != self._pending.get(letter):
-                log.warning("distributor %s: corrupt read 0x%02X (impossible "
-                            "bits 0x%02X), discarding",
-                            letter, raw, status.unknown_bits)
+            self.note_corrupt(letter, raw,
+                              "impossible bits 0x%02X" % status.unknown_bits)
             self._pending[letter] = raw
-            path = "/Distributor/%s/CorruptReads" % letter
-            self._service[path] = self._service[path] + 1
             self.comm_failure(letter)
             return
         self.fail_counts[letter] = 0
@@ -368,6 +365,15 @@ class LynxBatteryService:
                 s["%s/Fuse/%d/Alarms/Blown" % (base, i)] = (
                     ALARM_ALARM if value == FUSE_BLOWN else ALARM_OK)
             self._publish_fuse_blown(s)
+
+    def note_corrupt(self, letter: str, raw: int, why: str) -> None:
+        """Count a discarded read; log once per distinct byte value."""
+        if raw != self._last_corrupt.get(letter):
+            log.warning("distributor %s: corrupt read 0x%02X (%s), "
+                        "discarding", letter, raw, why)
+            self._last_corrupt[letter] = raw
+        path = "/Distributor/%s/CorruptReads" % letter
+        self._service[path] = self._service[path] + 1
 
     def comm_failure(self, letter: str) -> None:
         """One failed poll; mark comms-lost after a few in a row."""
@@ -410,6 +416,10 @@ class LynxBatteryService:
 
 class FuseMonitor:
     """Owns the CH347 adapter and the poll loop."""
+
+    # Max 1-byte transactions per distributor per poll while hunting for
+    # two consecutive agreeing valid reads.
+    READ_ATTEMPTS = 4
 
     def __init__(self, bus, config: Config):
         self.config = config
@@ -490,6 +500,31 @@ class FuseMonitor:
 
     # ── poll loop ───────────────────────────────────────────────────────
 
+    def _read_status(self, letter: str):
+        """Read with intra-poll confirmation: two consecutive transactions
+        must return the same valid byte.  Bus glitches are single-
+        transaction events, so a corrupted-but-plausible byte is filtered
+        here, milliseconds later, instead of surviving to the publish
+        pipeline.  Returns the confirmed byte, or None if the bus stayed
+        noisy for the whole attempt budget."""
+        addr = ADDRESSES[letter]
+        prev = None
+        for _ in range(self.READ_ATTEMPTS):
+            raw = self.adapter.i2c_read(addr, 1)[0]
+            bad_bits = decode(raw).unknown_bits
+            if bad_bits:
+                self.service.note_corrupt(
+                    letter, raw, "impossible bits 0x%02X" % bad_bits)
+                prev = None
+                continue
+            if raw == prev:
+                return raw
+            if prev is not None:
+                self.service.note_corrupt(
+                    letter, raw, "disagrees with read 0x%02X" % prev)
+            prev = raw
+        return None
+
     def _poll(self) -> bool:
         if not self._ensure_adapter():
             for letter in self.config.letters:
@@ -497,7 +532,7 @@ class FuseMonitor:
             return True
         for letter in self.config.letters:
             try:
-                raw = self.adapter.i2c_read(ADDRESSES[letter], 1)[0]
+                raw = self._read_status(letter)
             except I2CNackError:
                 # The USB round-trip worked; only the distributor is silent.
                 self._mark_healthy()
@@ -511,7 +546,10 @@ class FuseMonitor:
                 return True
             else:
                 self._mark_healthy()
-                self.service.update(letter, raw)
+                if raw is None:
+                    self.service.comm_failure(letter)
+                else:
+                    self.service.update(letter, raw)
         return True
 
 
