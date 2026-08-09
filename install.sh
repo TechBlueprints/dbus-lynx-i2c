@@ -126,13 +126,14 @@ echo ""
 # Step 5: Start or restart service
 echo "Step 5: Starting service..."
 
-# daemontools' svscan polls /service every few seconds and starts the
-# service on its own. Two traps here: on a first install the supervise
-# directory does not exist yet and svstat prints "unable to open
-# supervise/ok" -- which contains the substring "up", so the status test
-# must anchor on ": up " -- and if svscan hit a transient error it only
-# retries on its next scan, so allow several cycles.
-for _ in $(seq 1 30); do
+# daemontools' svscan finds and starts the service on its own, but on a
+# busy GX that can take up to a minute. Two traps: before svscan gets
+# there the supervise directory does not exist and svstat prints "unable
+# to open supervise/ok" -- which contains the substring "up", so the
+# status test must anchor on ": up " -- and svc(8) cannot force the
+# issue, because it needs the control fifo that supervise creates.
+echo "Waiting for daemontools to pick up the service (up to 60s)..."
+for _ in $(seq 1 60); do
     svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q ": up " && break
     sleep 1
 done
@@ -153,9 +154,10 @@ else
     if svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q ": up "; then
         echo "Service started"
     else
-        echo "WARNING: service did not start."
-        echo "Check: svstat /service/$SERVICE_NAME"
-        echo "       tail -n 30 /var/log/$SERVICE_NAME/current"
+        echo "Service is registered but has not started yet."
+        echo "daemontools usually picks it up within a minute; check with:"
+        echo "  svstat /service/$SERVICE_NAME"
+        echo "  tail -n 30 /var/log/$SERVICE_NAME/current"
     fi
 fi
 
