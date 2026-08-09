@@ -60,7 +60,7 @@ from ch347 import CH347I2C, CH347Error, I2CNackError, SPEED_LEVELS  # noqa: E402
 from lynx_distributor import (  # noqa: E402
     ADDRESSES, MAX_FUSES, FuseStatus, decode, describe)
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # Lynx Smart BMS distributor conventions (Venus wiki dbus.md + gui-v2
 # PageLynxDistributorList.qml / FuseInfo.qml):
