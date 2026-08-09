@@ -451,3 +451,16 @@ def test_noisy_poll_gives_up_without_publishing(env):
     env.monitor._poll()
     assert gx_distributor_row(env.svc, "A") == (True, "Ok")
     assert gx_battery_alarms_fuse_blown(env.svc) == 0
+
+
+def test_graceful_stop_raises_no_alarms(env):
+    # Regression: every deploy/restart used to ring the GX buzzer --
+    # stop() published ConnectionLost=2 for all distributors on the way
+    # out. Shutdown must leave alarm paths untouched.
+    env.monitor._poll()
+    env.monitor.stop()
+    for letter in ("A", "B"):
+        assert env.svc.paths["/Distributor/%s/Alarms/ConnectionLost" % letter] == 0
+        assert env.svc.paths["/Distributor/%s/Status" % letter] == 1
+    assert env.adapter.closed
+    assert env.monitor.adapter is None

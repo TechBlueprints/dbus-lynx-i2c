@@ -443,7 +443,17 @@ class FuseMonitor:
         GLib.timeout_add(int(self.config.poll_interval * 1000), self._poll)
 
     def stop(self) -> None:
-        self._drop_adapter(log_it=False)
+        # Graceful shutdown must NOT go through _drop_adapter: publishing
+        # /Alarms/ConnectionLost in the process's final moment rings the
+        # GX buzzer on every restart/deploy (venus-platform sees the 0->2
+        # edge before the service vanishes from the bus). Just close the
+        # adapter; the D-Bus service disappears with the process.
+        if self.adapter is not None:
+            try:
+                self.adapter.close()
+            except OSError:
+                pass
+            self.adapter = None
 
     # ── adapter lifecycle ───────────────────────────────────────────────
 
