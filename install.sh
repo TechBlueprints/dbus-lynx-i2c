@@ -126,12 +126,14 @@ echo ""
 # Step 5: Start or restart service
 echo "Step 5: Starting service..."
 
-# daemontools' svscan polls /service every few seconds; on a first install
-# the supervise directory does not exist yet, and svstat then prints
-# "unable to open supervise/ok" -- which contains the substring "up", so
-# the status test below must anchor on ": up " rather than "up".
-for _ in $(seq 1 15); do
-    [ -e "/service/$SERVICE_NAME/supervise/ok" ] && break
+# daemontools' svscan polls /service every few seconds and starts the
+# service on its own. Two traps here: on a first install the supervise
+# directory does not exist yet and svstat prints "unable to open
+# supervise/ok" -- which contains the substring "up", so the status test
+# must anchor on ": up " -- and if svscan hit a transient error it only
+# retries on its next scan, so allow several cycles.
+for _ in $(seq 1 30); do
+    svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q ": up " && break
     sleep 1
 done
 
@@ -142,12 +144,19 @@ if svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q ": up "; then
         sleep 2
         echo "Service restarted"
     else
-        echo "Service already running, no updates needed"
+        echo "Service running"
     fi
 else
-    svc -u "/service/$SERVICE_NAME"
-    sleep 2
-    echo "Service started"
+    echo "Service not up yet; asking supervise to start it..."
+    svc -u "/service/$SERVICE_NAME" 2>/dev/null || true
+    sleep 5
+    if svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q ": up "; then
+        echo "Service started"
+    else
+        echo "WARNING: service did not start."
+        echo "Check: svstat /service/$SERVICE_NAME"
+        echo "       tail -n 30 /var/log/$SERVICE_NAME/current"
+    fi
 fi
 
 echo ""
