@@ -180,3 +180,37 @@ def test_open_errors_when_no_adapter(tmp_path, monkeypatch):
     monkeypatch.setattr(ch347, "find_hidraw_paths", lambda *a, **k: [])
     with pytest.raises(CH347Error):
         CH347I2C.open()
+
+
+# ── burst read (fast data phase) ───────────────────────────────────────────
+
+
+def test_burst_read_stream_and_speed_changes():
+    dev, t = make_dev([frame(b"\x01\x30\x30")])
+    dev.speed_hz = 20000
+    status, echo = dev.i2c_read_burst(0x08, 750000)
+    assert (status, echo) == (0x30, 0x30)
+    # slow(0x60) addr, fast(0x63) status+ACK, slow(0x60) echo+NACK, stop
+    stream = b"\xaa\x60\x74\x81\x11\x63\xc1\x60\xc0\x75\x00"
+    assert t.writes == [b"\x00" + struct.pack("<H", len(stream)) + stream]
+
+
+def test_burst_read_400k_level():
+    dev, t = make_dev([frame(b"\x01\x00\x00")])
+    dev.speed_hz = 20000
+    dev.i2c_read_burst(0x08, 400000)
+    assert b"\x62\xc1" in t.writes[0]   # level 2 == 400 kHz
+
+
+def test_burst_read_nack():
+    dev, _ = make_dev([frame(b"\x00\xff\xff")])
+    dev.speed_hz = 20000
+    with pytest.raises(I2CNackError):
+        dev.i2c_read_burst(0x08)
+
+
+def test_burst_read_rejects_bad_speed():
+    dev, _ = make_dev()
+    dev.speed_hz = 20000
+    with pytest.raises(ValueError):
+        dev.i2c_read_burst(0x08, 50000)

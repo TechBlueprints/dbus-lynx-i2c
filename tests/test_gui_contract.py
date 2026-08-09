@@ -464,3 +464,70 @@ def test_graceful_stop_raises_no_alarms(env):
         assert env.svc.paths["/Distributor/%s/Status" % letter] == 1
     assert env.adapter.closed
     assert env.monitor.adapter is None
+
+
+class BurstAdapter(FakeAdapter):
+    """Adapter supporting the fast-data burst read: responses may be a
+    plain byte or an (status, echo) tuple."""
+
+    def i2c_read_burst(self, addr, data_speed_hz):
+        r = self.responses[addr]
+        if isinstance(r, list):
+            r = r.pop(0) if len(r) > 1 else r[0]
+        if isinstance(r, Exception):
+            raise r
+        return r if isinstance(r, tuple) else (r, r)
+
+
+@pytest.fixture
+def benv(lynx_service, monkeypatch, tmp_path):
+    monkeypatch.setattr(lynx_service, "VeDbusService", FakeVeDbusService)
+    monkeypatch.setattr(lynx_service, "SettingsDevice", FakeSettingsDevice)
+    (tmp_path / "config.ini").write_text(
+        "[DEFAULT]\ndistributors = A\ndata_speed_hz = 750000\n")
+    config = lynx_service.load_config(str(tmp_path))
+    adapter = BurstAdapter()
+    adapter.responses = {ADDRESSES["A"]: 0x00}
+    monkeypatch.setattr(lynx_service, "CH347I2C",
+                        types.SimpleNamespace(open=lambda **kw: adapter))
+    monitor = lynx_service.FuseMonitor(bus=None, config=config)
+    return types.SimpleNamespace(monitor=monitor, adapter=adapter,
+                                 svc=monitor.service._service)
+
+
+def test_burst_echo_confirms_in_one_transaction(benv):
+    # Matching echo accepts immediately -- a real change needs only the
+    # cross-poll debounce, not a second transaction.
+    benv.monitor._poll()
+    benv.adapter.responses[ADDRESSES["A"]] = 0x10
+    benv.monitor._poll()   # first sighting (debounce)
+    benv.monitor._poll()   # confirmed
+    assert benv.svc.paths["/Distributor/A/Fuse/0/Status"] == 3
+    assert benv.svc.paths["/Distributor/A/CorruptReads"] == 0
+
+
+def test_burst_truncated_echo_is_ignored_not_counted(benv):
+    # The slow echo copy absorbs the truncation; that is expected and
+    # must not be treated as an error, only as "no cross-check".
+    benv.monitor._poll()
+    benv.adapter.responses[ADDRESSES["A"]] = (0x00, 0x7F)
+    benv.monitor._poll()
+    assert benv.svc.paths["/Distributor/A/Status"] == 1
+    assert benv.svc.paths["/Distributor/A/CorruptReads"] == 0
+
+
+def test_burst_echo_disagreement_rejects_read(benv):
+    # Two valid but differing copies in one transaction: untrustworthy.
+    benv.monitor._poll()
+    benv.adapter.responses[ADDRESSES["A"]] = (0x10, 0x00)
+    benv.monitor._poll()
+    assert benv.svc.paths["/Distributor/A/Fuse/0/Status"] == 2  # unchanged
+    assert benv.svc.paths["/Distributor/A/CorruptReads"] > 0
+
+
+def test_burst_corrupt_status_still_caught(benv):
+    benv.monitor._poll()
+    benv.adapter.responses[ADDRESSES["A"]] = (0x3F, 0x3F)
+    benv.monitor._poll()
+    assert benv.svc.paths["/Distributor/A/Status"] == 1
+    assert benv.svc.paths["/Distributor/A/CorruptReads"] > 0

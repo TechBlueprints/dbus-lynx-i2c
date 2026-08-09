@@ -95,7 +95,7 @@ ADAPTER_TYPES = ("ch347", "kernel-i2c", "mock")
 class Config:
     def __init__(self, letters, fuse_counts, fuse_names, poll_interval,
                  i2c_speed_hz, hidraw_device, adapter="ch347",
-                 i2c_device=None):
+                 i2c_device=None, data_speed_hz=750000):
         self.letters = letters
         self.fuse_counts = fuse_counts  # {letter: populated fuse positions}
         self.fuse_names = fuse_names    # {letter: [name, ...] padded to MAX_FUSES}
@@ -104,6 +104,7 @@ class Config:
         self.hidraw_device = hidraw_device
         self.adapter = adapter          # one of ADAPTER_TYPES
         self.i2c_device = i2c_device    # kernel-i2c only: /dev/i2c-N
+        self.data_speed_hz = data_speed_hz  # ch347 burst read; 0 disables
 
     @property
     def mock(self):
@@ -190,6 +191,17 @@ def load_config(base_dir: str) -> Config:
     hidraw_device = sec.get("hidraw_device", "").strip() or None
     i2c_device = sec.get("i2c_device", "").strip() or None
 
+    try:
+        data_speed_hz = sec.getint("data_speed_hz", 750000)
+    except ValueError:
+        raise ConfigError("data_speed_hz must be an integer")
+    if data_speed_hz and data_speed_hz not in SPEED_LEVELS:
+        raise ConfigError("data_speed_hz must be 0 (disabled) or one of %s"
+                          % sorted(SPEED_LEVELS))
+    if data_speed_hz and data_speed_hz < i2c_speed_hz:
+        raise ConfigError("data_speed_hz (%d) must be >= i2c_speed_hz (%d)"
+                          % (data_speed_hz, i2c_speed_hz))
+
     adapter = sec.get("adapter", "ch347").strip().lower()
     if adapter not in ADAPTER_TYPES:
         raise ConfigError("adapter must be one of %s" % (ADAPTER_TYPES,))
@@ -202,7 +214,7 @@ def load_config(base_dir: str) -> Config:
 
     return Config(letters, fuse_counts, fuse_names, poll_interval,
                   i2c_speed_hz, hidraw_device, adapter=adapter,
-                  i2c_device=i2c_device)
+                  i2c_device=i2c_device, data_speed_hz=data_speed_hz)
 
 
 def distributor_status_value(status: FuseStatus) -> int:
@@ -510,23 +522,47 @@ class FuseMonitor:
 
     # ── poll loop ───────────────────────────────────────────────────────
 
+    def _read_once(self, addr: int):
+        """One transaction -> (status, echo).  ``echo`` is None unless the
+        adapter supports the burst read and the echo copy survived."""
+        if self.config.data_speed_hz and hasattr(self.adapter,
+                                                 "i2c_read_burst"):
+            status, echo = self.adapter.i2c_read_burst(
+                addr, self.config.data_speed_hz)
+            # The echo is clocked slowly and absorbs the truncation, so a
+            # corrupt echo is expected and simply carries no information.
+            return status, (None if decode(echo).unknown_bits else echo)
+        return self.adapter.i2c_read(addr, 1)[0], None
+
     def _read_status(self, letter: str):
-        """Read with intra-poll confirmation: two consecutive transactions
-        must return the same valid byte.  Bus glitches are single-
-        transaction events, so a corrupted-but-plausible byte is filtered
-        here, milliseconds later, instead of surviving to the publish
-        pipeline.  Returns the confirmed byte, or None if the bus stayed
-        noisy for the whole attempt budget."""
+        """Read a distributor's status byte, rejecting truncated frames.
+
+        The burst read clocks the status byte fast enough to beat the
+        distributor's mid-byte abort, and returns a second slow copy that
+        cross-checks it within the same transaction whenever that copy
+        survives.  On failure the read is retried within the poll; the
+        cross-poll change debounce remains as a further backstop.
+        Returns the accepted byte, or None if the attempt budget ran out.
+        """
         addr = ADDRESSES[letter]
         prev = None
         for _ in range(self.READ_ATTEMPTS):
-            raw = self.adapter.i2c_read(addr, 1)[0]
+            raw, echo = self._read_once(addr)
             bad_bits = decode(raw).unknown_bits
             if bad_bits:
                 self.service.note_corrupt(
                     letter, raw, "impossible bits 0x%02X" % bad_bits)
                 prev = None
                 continue
+            if echo is not None:
+                if echo == raw:
+                    return raw          # confirmed within one transaction
+                self.service.note_corrupt(
+                    letter, raw, "echo copy read 0x%02X" % echo)
+                prev = None
+                continue
+            # No usable echo (plain adapter, or echo truncated): fall back
+            # to requiring two consecutive transactions to agree.
             if raw == prev:
                 return raw
             if prev is not None:

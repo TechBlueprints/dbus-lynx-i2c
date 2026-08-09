@@ -262,6 +262,45 @@ class CH347I2C:
             raise I2CNackError(addr)
         return bytes(payload[1:1 + nbytes])
 
+    def i2c_read_burst(self, addr: int, data_speed_hz: int = 750000) -> tuple:
+        """Read a status byte with the data phase clocked fast.
+
+        The Lynx Distributor aborts its transmission roughly 60 us into
+        a data byte (see README "Truncated reads"), so at 20 kHz the
+        byte is regularly cut short and the pull-ups fill the rest with
+        1s.  The I2C speed opcode is part of the command stream, so the
+        clock can change mid-transaction: START and the address stay at
+        the (reliable) bus speed, the data byte is clocked at
+        ``data_speed_hz`` -- ~11 us at 750 kHz, beating the abort
+        window -- and the closing NACK drops back to the bus speed,
+        because the slave misses a NACK delivered at high speed and
+        keeps driving SDA, which blocks the following transaction.
+
+        Returns ``(status, echo)``.  Every read returns the same status
+        byte, so ``echo`` is a second copy clocked at the slow rate: it
+        is the byte that now absorbs the truncation, and when it
+        survives intact it doubles as an intra-transaction cross-check.
+        """
+        self._check_addr(addr)
+        if data_speed_hz not in SPEED_LEVELS:
+            raise ValueError("unsupported data speed %d Hz; CH347 supports %s"
+                             % (data_speed_hz, sorted(SPEED_LEVELS)))
+        if self.speed_hz is None:
+            raise CH347Error("bus speed not set")
+        slow = CMD_I2C_STM_SET | SPEED_LEVELS[self.speed_hz]
+        fast = CMD_I2C_STM_SET | SPEED_LEVELS[data_speed_hz]
+        cmds = [slow,
+                CMD_I2C_STM_STA, CMD_I2C_STM_OUT | 1, (addr << 1) | 1,
+                fast,
+                CMD_I2C_STM_IN | 1,   # status byte, clocked fast, ACKed
+                slow,
+                CMD_I2C_STM_IN,       # echo copy, slow, closing NACK
+                CMD_I2C_STM_STO]
+        payload = self._xfer(self._stream(cmds), expect=3)
+        if payload[0] != 0x01:
+            raise I2CNackError(addr)
+        return payload[1], payload[2]
+
     def i2c_write(self, addr: int, data: bytes = b"") -> None:
         """Plain I2C write: START, addr+W, data, STOP."""
         self._check_addr(addr)
