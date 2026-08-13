@@ -365,9 +365,18 @@ class LynxBatteryService:
             self._pending[letter] = raw  # changed: await confirmation
             return
         self._pending.pop(letter, None)
-        if raw != self._last_raw[letter]:
+        changed = raw != self._last_raw[letter]
+        if changed:
             log.info("distributor %s: %s", letter, describe(status))
         self._last_raw[letter] = raw
+        if not changed:
+            # Steady state (the overwhelming majority of polls): D-Bus
+            # already holds exactly this state, so every write below would
+            # be a no-op. vedbus suppresses the *signal* for an unchanged
+            # value, but the ~20 writes, 16 reads and ~38 path-string
+            # formats still cost real CPU on a GX. _last_raw is cleared on
+            # comms loss, so recovery always republishes.
+            return
         base = "/Distributor/%s" % letter
         with self._service as s:
             s["%s/Status" % base] = distributor_status_value(status)

@@ -46,6 +46,7 @@ class FakeVeDbusService:
         self.registered = False
         self.paths = {}
         self.writeable_callbacks = {}
+        self.write_count = 0
 
     def add_path(self, path, value, description="", writeable=False,
                  onchangecallback=None, gettextcallback=None):
@@ -63,6 +64,7 @@ class FakeVeDbusService:
     def __setitem__(self, path, value):
         if path not in self.paths:
             raise KeyError(path)
+        self.write_count += 1
         self.paths[path] = value
 
     # velib batches updates via `with service as s:` (ServiceContext
@@ -531,3 +533,35 @@ def test_burst_corrupt_status_still_caught(benv):
     benv.monitor._poll()
     assert benv.svc.paths["/Distributor/A/Status"] == 1
     assert benv.svc.paths["/Distributor/A/CorruptReads"] > 0
+
+
+def test_steady_state_poll_does_no_dbus_writes(env):
+    # Efficiency: an unchanged status byte must not re-write ~20 paths per
+    # poll. D-Bus already holds the state; the writes were pure CPU cost.
+    env.monitor._poll()
+    env.monitor._poll()
+    before = env.svc.write_count
+    for _ in range(5):
+        env.monitor._poll()
+    assert env.svc.write_count == before, "steady-state polls still writing"
+    # ...but a real change must still publish.
+    env.adapter.responses[ADDRESSES["A"]] = 0x10
+    env.monitor._poll()
+    env.monitor._poll()
+    assert env.svc.write_count > before
+    assert gx_distributor_row(env.svc, "A") == (True, "Fuse blown")
+
+
+def test_recovery_after_comms_loss_republishes(env):
+    # _last_raw is cleared on comms loss, so the same byte must publish
+    # again on recovery rather than being skipped as "unchanged".
+    env.monitor._poll()
+    env.monitor._poll()
+    env.adapter.responses[ADDRESSES["A"]] = I2CNackError(ADDRESSES["A"])
+    for _ in range(3):
+        env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Connection lost")
+    env.adapter.responses[ADDRESSES["A"]] = 0x00
+    env.monitor._poll()
+    assert gx_distributor_row(env.svc, "A") == (True, "Ok")
+    assert env.svc.paths["/Distributor/A/Alarms/ConnectionLost"] == 0
