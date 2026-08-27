@@ -328,6 +328,15 @@ and sounds the GX buzzer for each.
 python3 -m pytest
 ```
 
+Venus OS ships **Python 3.12** (3.12.13 on the target Cerbo), so run the
+suite on 3.12 rather than an older system python — a macOS default of
+3.9 will happily pass while hiding version-specific breakage:
+
+```bash
+python3.12 -m venv .venv312 && .venv312/bin/pip install pytest
+.venv312/bin/python -m pytest
+```
+
 Runs on any dev machine — Venus-only libraries (`dbus`, `gi`, `velib_python`) are stubbed, the CH347 driver is tested against a fake HID transport with wire-format assertions, and the decoder/config parsing are covered directly.
 
 ## Installation
