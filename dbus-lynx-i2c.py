@@ -630,6 +630,18 @@ def main() -> None:
                        for l in config.letters),
              config.poll_interval, config.i2c_speed_hz)
 
+    # Single-threaded by design, and the design depends on it. Every D-Bus
+    # touch -- this connection, the VeDbusService publishes and the
+    # SettingsDevice writes -- happens in GLib main-loop callbacks on this
+    # one thread. velib's SettingsDevice is thread-affinity *transparent*,
+    # not thread-safe: it never builds a bus, it blocks on whichever one it
+    # was handed (__setitem__ -> set_value -> self._bus.call_blocking()).
+    # So if a worker thread is ever added here (I2C prefetch, a slow
+    # adapter), do not call D-Bus from it -- hand the result back with
+    # GLib.idle_add and publish on this thread. Getting it wrong shows up
+    # as intermittent hangs or misrouted replies, not a clean error.
+    # DBusGMainLoop must stay ahead of dbusconnection(): the connection is
+    # wired to the GLib loop at construction time.
     DBusGMainLoop(set_as_default=True)
     monitor = FuseMonitor(dbusconnection(), config)
 
